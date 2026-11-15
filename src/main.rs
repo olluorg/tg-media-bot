@@ -177,7 +177,7 @@ async fn housekeeping(app: Arc<App>) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tick.tick().await;
-        let _ = std::fs::write(&health_file, state::now_secs().to_string());
+        let _ = tokio::fs::write(&health_file, state::now_secs().to_string()).await;
         app.store.flush_async().await;
     }
 }

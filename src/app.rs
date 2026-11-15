@@ -947,7 +947,7 @@ impl App {
                 return Err(JobError::NoSpace);
             }
         }
-        std::fs::create_dir_all(dir).map_err(|e| JobError::Dl(DlError::Internal(e.to_string())))?;
+        tokio::fs::create_dir_all(dir).await.map_err(|e| JobError::Dl(DlError::Internal(e.to_string())))?;
 
         let (kind, cap) = (job.quality.kind(), job.quality.cap());
         let lookup = |p: &Probed| self.store.cache_find(&probe_keys(job, p));
