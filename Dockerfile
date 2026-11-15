@@ -1,14 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG DENO_VERSION=2.5.6
 ARG FFMPEG_VERSION=7.1.1
-# YouTube needs a JavaScript runtime for yt-dlp to solve its player challenges.
-# Deno runs only while a YouTube page is being extracted (~300 MB for a few
-# seconds). Build with --build-arg INSTALL_DENO=false on a very small server
-# if you don't need YouTube in full quality.
-ARG INSTALL_DENO=true
-
-FROM denoland/deno:bin-${DENO_VERSION} AS deno
 
 # Static ffmpeg/ffprobe: ~200 MB lighter than Debian's package and newer.
 FROM mwader/static-ffmpeg:${FFMPEG_VERSION} AS ffmpeg
@@ -16,8 +8,9 @@ FROM mwader/static-ffmpeg:${FFMPEG_VERSION} AS ffmpeg
 # ---- build ------------------------------------------------------------------
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
-# Ride out flaky DNS/network in build sandboxes.
-ENV CARGO_NET_RETRY=10
+# Ride out flaky DNS/network in build sandboxes and compile for modern x86-64-v3 (AVX2, BMI2).
+ENV CARGO_NET_RETRY=10 \
+    RUSTFLAGS="-C target-cpu=x86-64-v3"
 # Build dependencies first so source edits don't rebuild them.
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs \
@@ -28,10 +21,11 @@ RUN touch src/main.rs && cargo build --release --locked
 
 # ---- runtime ----------------------------------------------------------------
 FROM python:3.12-slim-bookworm
-ARG INSTALL_DENO
 
-RUN --mount=type=bind,from=deno,source=/deno,target=/tmp/deno \
-    if [ "$INSTALL_DENO" = "true" ]; then install -m755 /tmp/deno /usr/local/bin/deno; fi
+# QuickJS: ultra-lightweight JS engine for YouTube player challenges (~5 MB RAM vs ~300 MB with Deno).
+RUN apt-get update && apt-get install -y --no-install-recommends quickjs \
+    && rm -rf /var/lib/apt/lists/* \
+    && (ln -s /usr/bin/qjs /usr/local/bin/quickjs 2>/dev/null || true)
 
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
     && python -m venv /opt/yt-dlp \
