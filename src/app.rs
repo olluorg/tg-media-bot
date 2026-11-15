@@ -168,9 +168,18 @@ impl Drop for JobGuard {
             }
         }
         self.app.store.remove_active_job(&self.id);
-        if self.dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&self.dir) {
-                log::warn!("could not remove {}: {e}", self.dir.display());
+        let dir = self.dir.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || {
+                if dir.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&dir) {
+                        log::warn!("could not remove {}: {e}", dir.display());
+                    }
+                }
+            });
+        } else if dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                log::warn!("could not remove {}: {e}", dir.display());
             }
         }
     }
@@ -218,18 +227,29 @@ pub fn lower_quality_keyboard(t: &Strings, token: &str, current: Quality) -> Opt
 }
 
 fn build_caption(title: &str, url: &str) -> String {
-    let url_html = format!("<code>{}</code>", html_escape(url));
+    let escaped_url = html_escape(url);
     let title = title.trim();
     if title.is_empty() {
-        return util::truncate_chars(&url_html, CAPTION_MAX).to_string();
+        let mut res = String::with_capacity(escaped_url.len() + 14);
+        res.push_str("<code>");
+        res.push_str(&escaped_url);
+        res.push_str("</code>");
+        return util::truncate_chars(&res, CAPTION_MAX).to_string();
     }
     // Entities are counted after parsing, so budget on the raw title length.
     let budget = CAPTION_MAX.saturating_sub(url.chars().count() + 4);
     if budget < 8 {
-        return util::truncate_chars(&html_escape(title), CAPTION_MAX).to_string();
+        let escaped = html_escape(title);
+        return util::truncate_chars(&escaped, CAPTION_MAX).to_string();
     }
     let title = util::truncate_chars(title, budget);
-    format!("{}\n\n{url_html}", html_escape(title))
+    let escaped_title = html_escape(title);
+    let mut res = String::with_capacity(escaped_title.len() + escaped_url.len() + 16);
+    res.push_str(&escaped_title);
+    res.push_str("\n\n<code>");
+    res.push_str(&escaped_url);
+    res.push_str("</code>");
+    res
 }
 
 pub fn stage_label(t: &Strings, stage: &Stage) -> &'static str {
@@ -245,19 +265,23 @@ pub fn stage_label(t: &Strings, stage: &Stage) -> &'static str {
 }
 
 pub fn render_status(job: &Job) -> String {
+    use std::fmt::Write;
     let t = job.lang.t();
     let stage = job.stage.borrow().clone();
-    let mut text = format!("<b>{}</b> · {}", stage_label(t, &stage), job.quality.label(t));
+    let mut text = String::with_capacity(384);
+    let _ = write!(text, "<b>{}</b> · {}", stage_label(t, &stage), job.quality.label(t));
     if let Some(title) = job.title() {
         if !title.trim().is_empty() {
-            text.push_str(&format!("\n🎬 <b>{}</b>", html_escape(&title)));
+            let _ = write!(text, "\n🎬 <b>{}</b>", html_escape(&title));
         }
     }
-    let bar = |pct: f32| format!("\n<code>{}</code> {pct:.0}%", util::progress_bar(pct));
+    let bar = |dest: &mut String, pct: f32| {
+        let _ = write!(dest, "\n<code>{}</code> {pct:.0}%", util::progress_bar(pct));
+    };
     match stage {
         Stage::Downloading { pct, speed, eta } => {
             if let Some(p) = pct {
-                text.push_str(&bar(p));
+                bar(&mut text, p);
             }
             let mut meta = Vec::new();
             if let Some(s) = speed {
@@ -271,19 +295,20 @@ pub fn render_status(job: &Job) -> String {
                 text.push_str(&meta.join(" · "));
             }
         }
-        Stage::Transcoding { pct: Some(p) } => text.push_str(&bar(p)),
+        Stage::Transcoding { pct: Some(p) } => bar(&mut text, p),
         Stage::Uploading { total } if total > 0 => {
             let sent = job.sent.load(Ordering::Relaxed).min(total);
-            text.push_str(&bar(sent as f32 * 100.0 / total as f32));
-            text.push_str(&format!("\n{} / {}", util::fmt_size(sent), util::fmt_size(total)));
+            bar(&mut text, sent as f32 * 100.0 / total as f32);
+            let _ = write!(text, "\n{} / {}", util::fmt_size(sent), util::fmt_size(total));
         }
         _ => {}
     }
-    text.push_str(&format!(
+    let _ = write!(
+        text,
         "\n<code>{}</code> · <code>{}</code>",
         html_escape(util::truncate_chars(&job.url, 80)),
         job.id
-    ));
+    );
     text
 }
 

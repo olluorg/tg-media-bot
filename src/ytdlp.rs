@@ -441,6 +441,9 @@ fn base_args(cfg: &Config, net: &NetOpts) -> Vec<String> {
         "5",
         "--extractor-retries",
         "2",
+        "--no-write-comments",
+        "--no-write-subs",
+        "--no-write-playlist-metafiles",
     ]
     .iter()
     .map(|s| s.to_string())
