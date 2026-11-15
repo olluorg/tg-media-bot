@@ -179,7 +179,10 @@ mod tests {
             ("https://vk.com/video-123456_789012", Some("vk:-123456_789012")),
             ("https://vk.com/clip-123456_789012", Some("vk:-123456_789012")),
             ("https://vkvideo.ru/video-123456_789012?list=abc", Some("vk:-123456_789012")),
-            ("https://rutube.ru/video/abcdef1234567890abcdef1234567890/", Some("rutube:abcdef1234567890abcdef1234567890")),
+            (
+                "https://rutube.ru/video/abcdef1234567890abcdef1234567890/",
+                Some("rutube:abcdef1234567890abcdef1234567890"),
+            ),
             ("https://coub.com/view/2v1a3b", Some("coub:2v1a3b")),
             ("https://www.pinterest.com/pin/123456789/", Some("pinterest:123456789")),
             ("https://example.com/watch/1", None),

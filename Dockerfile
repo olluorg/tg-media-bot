@@ -36,6 +36,7 @@ RUN --mount=type=bind,from=deno,source=/deno,target=/tmp/deno \
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
     && python -m venv /opt/yt-dlp \
     && /opt/yt-dlp/bin/pip install --no-cache-dir "yt-dlp[default]" \
+    && /opt/yt-dlp/bin/python -m compileall -q /opt/yt-dlp \
     && chown -R app:app /opt/yt-dlp \
     && mkdir -p /data/tmp /cookies /plugins \
     && chown -R app:app /data /cookies /plugins
@@ -46,8 +47,7 @@ COPY --from=build /src/target/release/tg-media-bot /usr/local/bin/tg-media-bot
 ENV PATH=/opt/yt-dlp/bin:$PATH \
     DATA_DIR=/data \
     TEMP_DIR=/data/tmp \
-    YTDLP_UPDATE_CMD="/opt/yt-dlp/bin/pip install --no-cache-dir -q -U yt-dlp[default]" \
-    PYTHONDONTWRITEBYTECODE=1 \
+    YTDLP_UPDATE_CMD="/opt/yt-dlp/bin/pip install --no-cache-dir -q -U yt-dlp[default] && /opt/yt-dlp/bin/python -m compileall -q /opt/yt-dlp" \
     MALLOC_ARENA_MAX=2
 
 USER app

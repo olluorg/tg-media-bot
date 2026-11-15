@@ -283,6 +283,7 @@ impl Bot {
         thread_id: Option<i64>,
         text: &str,
         markup: Option<Value>,
+        reply_to: Option<i64>,
     ) -> Result<Message, TgError> {
         let mut body = json!({
             "chat_id": chat_id,
@@ -295,6 +296,12 @@ impl Bot {
         }
         if let Some(m) = markup {
             body["reply_markup"] = m;
+        }
+        if let Some(r) = reply_to {
+            body["reply_parameters"] = json!({
+                "message_id": r,
+                "allow_sending_without_reply": true,
+            });
         }
         self.call("sendMessage", &body, SHORT_TIMEOUT).await
     }

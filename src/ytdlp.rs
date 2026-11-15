@@ -490,6 +490,9 @@ fn download_args(cfg: &Config, net: &NetOpts, plan: &Plan, dir: &Path) -> Vec<St
         format!("thumbnail:{}", template_path(dir, "cover.%(ext)s")),
         s("--write-thumbnail"),
         s("--no-mtime"),
+        s("--no-part"),
+        s("--buffer-size"),
+        s("1024k"),
         s("--concurrent-fragments"),
         cfg.concurrent_fragments.to_string(),
     ]);
@@ -999,6 +1002,7 @@ mod tests {
         let a = download_args(&cfg, &NetOpts::default(), &video, dir);
         let joined = a.join(" ");
         assert!(joined.contains("--no-playlist --playlist-items 1"));
+        assert!(joined.contains("--no-part --buffer-size 1024k"));
         assert!(joined.contains("--concurrent-fragments 4"));
         assert!(joined.contains("--merge-output-format mp4"));
         assert!(joined.contains("-S res"));

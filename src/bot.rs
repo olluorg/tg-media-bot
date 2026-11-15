@@ -286,12 +286,12 @@ async fn enqueue_all(
     let summary_msg: Option<i64> = match picker {
         Some(msg) => {
             if app.bot.edit_message(ctx.chat, msg, &text, None).await.is_err() {
-                app.bot.send_message(ctx.chat, ctx.thread, &text, None).await.ok().map(|m| m.message_id)
+                app.bot.send_message(ctx.chat, ctx.thread, &text, None, user_msg_id).await.ok().map(|m| m.message_id)
             } else {
                 Some(msg)
             }
         }
-        None => app.bot.send_message(ctx.chat, ctx.thread, &text, None).await.ok().map(|m| m.message_id),
+        None => app.bot.send_message(ctx.chat, ctx.thread, &text, None, user_msg_id).await.ok().map(|m| m.message_id),
     };
     if skipped == 0 && added > 0 {
         if let Some(msg_id) = summary_msg {
@@ -456,7 +456,7 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 remaining -= ids.len();
             }
 
-            if let Ok(confirm_msg) = app.bot.send_message(chat, thread, t.cleared, None).await {
+            if let Ok(confirm_msg) = app.bot.send_message(chat, thread, t.cleared, None, None).await {
                 let bot = app.bot.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;

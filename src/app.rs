@@ -403,7 +403,7 @@ impl App {
     }
 
     pub async fn say(&self, chat_id: i64, thread_id: Option<i64>, text: &str, markup: Option<Value>) {
-        if let Err(e) = self.bot.send_message(chat_id, thread_id, text, markup).await {
+        if let Err(e) = self.bot.send_message(chat_id, thread_id, text, markup, None).await {
             log::warn!("sendMessage to {chat_id} failed: {e}");
         }
     }
@@ -636,13 +636,22 @@ impl App {
     }
 
     /// Send or edit, waiting out flood control instead of dropping the message.
-    async fn deliver(&self, job: &Job, msg_id: Option<i64>, text: &str, markup: Option<Value>) -> Option<i64> {
+    async fn deliver(
+        &self,
+        job: &Job,
+        msg_id: Option<i64>,
+        text: &str,
+        markup: Option<Value>,
+        reply_to: Option<i64>,
+    ) -> Option<i64> {
         for _ in 0..=FLOOD_RETRIES {
             let result = match msg_id {
                 Some(id) => self.bot.edit_message(job.chat_id, id, text, markup.clone()).await.map(|_| id),
-                None => {
-                    self.bot.send_message(job.chat_id, job.thread_id, text, markup.clone()).await.map(|m| m.message_id)
-                }
+                None => self
+                    .bot
+                    .send_message(job.chat_id, job.thread_id, text, markup.clone(), reply_to)
+                    .await
+                    .map(|m| m.message_id),
             };
             match result {
                 Err(e) if e.retry_after().is_some_and(|s| s <= FLOOD_MAX_WAIT) => {
@@ -873,7 +882,7 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
     let mut status_msg = app.status_msg(&job.id);
     if status_msg.is_none() && !job.minimal {
         let markup = cancel_markup(job.lang.t(), &job.id);
-        status_msg = app.deliver(&job, None, &render_status(&job), Some(markup)).await;
+        status_msg = app.deliver(&job, None, &render_status(&job), Some(markup), None).await;
         if let Some(id) = status_msg {
             app.set_status_msg(&job.id, id);
         }
@@ -936,8 +945,11 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                 None
             };
 
+            if let Some(msg) = status_msg {
+                let _ = app.bot.delete_message(job.chat_id, msg).await;
+            }
             let text = error_text(job.lang.t(), &app.cfg, &err, &job.url);
-            app.deliver(&job, status_msg, &text, markup).await;
+            app.deliver(&job, None, &text, markup, job.user_msg_id).await;
         }
     }
 }
