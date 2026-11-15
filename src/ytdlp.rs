@@ -45,18 +45,9 @@ pub enum DlError {
     Rejected(Reject),
     /// yt-dlp failed; carries its last error line.
     Failed(String),
-    Timeout,
+    ProbeTimeout,
+    DownloadTimeout,
     Internal(String),
-}
-
-impl From<RunError> for DlError {
-    fn from(e: RunError) -> Self {
-        match e {
-            RunError::Timeout => DlError::Timeout,
-            RunError::Stopped => DlError::Internal("process stopped".into()),
-            RunError::Spawn(e) => DlError::Internal(format!("could not run yt-dlp: {e}")),
-        }
-    }
 }
 
 /// Known failure classes that get a friendly, translated explanation.
@@ -419,6 +410,7 @@ pub fn plan(info: &Info, kind: Kind, cap: u32, limit: u64, keep_codec: bool) -> 
 pub struct NetOpts {
     pub cookies: bool,
     pub proxy: bool,
+    pub force_ipv4: bool,
     pub referer: Option<String>,
     pub headers: Vec<(String, String)>,
     pub file_urls: bool,
@@ -450,6 +442,10 @@ fn base_args(cfg: &Config, net: &NetOpts) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
+
+    if net.force_ipv4 && !a.iter().any(|x| x == "--force-ipv4" || x == "-4") {
+        a.push("--force-ipv4".to_string());
+    }
 
     if net.proxy {
         if let Some(proxy) = &cfg.proxy_url {
@@ -583,7 +579,12 @@ pub async fn probe(cfg: &Config, url: &str, net: &NetOpts, dir: &Path) -> Result
     let mut cmd = proc::command(&cfg.ytdlp_bin, cfg.child_nice);
     cmd.args(base_args(cfg, net)).arg("--dump-json").arg(url);
     cmd.stdout(Stdio::from(file)).stderr(Stdio::piped());
-    let out = proc::run(cmd, PROBE_TIMEOUT, |_| ControlFlow::Continue(())).await?;
+    let out = match proc::run(cmd, PROBE_TIMEOUT, |_| ControlFlow::Continue(())).await {
+        Ok(out) => out,
+        Err(RunError::Timeout) => return Err(DlError::ProbeTimeout),
+        Err(RunError::Stopped) => return Err(DlError::Internal("process stopped".into())),
+        Err(RunError::Spawn(e)) => return Err(DlError::Internal(format!("could not run yt-dlp: {e}"))),
+    };
     if !out.ok {
         return Err(DlError::Failed(error_line(&out.stderr)));
     }
@@ -628,7 +629,8 @@ async fn download(
         Ok(out) if out.ok => Ok(()),
         Ok(out) => Err(DlError::Failed(error_line(&out.stderr))),
         Err(RunError::Stopped) => Err(DlError::Rejected(Reject::TooLarge { bytes: overflow })),
-        Err(e) => Err(e.into()),
+        Err(RunError::Timeout) => Err(DlError::DownloadTimeout),
+        Err(RunError::Spawn(e)) => Err(DlError::Internal(format!("could not run yt-dlp: {e}"))),
     }
 }
 
@@ -786,10 +788,31 @@ pub async fn fetch(
         let raw = match attempt(cfg, &target, &net, kind, cap, dir, stage, lookup, on_title).await {
             Ok(outcome) => return Ok(outcome),
             Err(DlError::Failed(raw)) => raw,
+            Err(DlError::ProbeTimeout) => {
+                if !net.force_ipv4 {
+                    log::info!("probe timed out — retrying with --force-ipv4");
+                    net.force_ipv4 = true;
+                    continue;
+                }
+                if !net.proxy && cfg.proxy_url.is_some() {
+                    log::info!("probe timed out — retrying through the proxy");
+                    net.proxy = true;
+                    net.cookies = cfg.has_cookies() && net.referer.is_none();
+                    dropped_cookies = false;
+                    continue;
+                }
+                return Err(DlError::ProbeTimeout);
+            }
             Err(other) => return Err(other),
         };
         log::info!("yt-dlp failed: {raw}");
         let e = raw.to_lowercase();
+
+        if !net.force_ipv4 && is_connectivity(&e) {
+            log::info!("connectivity error — retrying with --force-ipv4");
+            net.force_ipv4 = true;
+            continue;
+        }
 
         if is_fragment_expiry(&e) {
             if let Some(lower) = EXPIRY_LADDER.into_iter().find(|h| *h < cap) {
@@ -1027,6 +1050,10 @@ mod tests {
         assert!(joined.contains("-x --audio-format m4a>m4a/mp3>mp3/mp4>m4a/mov>m4a/aac>m4a/mp3"));
         assert!(joined.contains("--referer https://e.com/ --add-header Origin:https://e.com --enable-file-urls"));
         assert!(!joined.contains("--merge-output-format"));
+
+        let ipv4_net = NetOpts { force_ipv4: true, ..NetOpts::default() };
+        let joined_ipv4 = download_args(&cfg, &ipv4_net, &video, dir).join(" ");
+        assert!(joined_ipv4.contains("--force-ipv4"));
 
         assert_eq!(template_path(Path::new("/a%b"), "media.%(ext)s").replace('\\', "/"), "/a%%b/media.%(ext)s");
     }

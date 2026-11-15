@@ -98,6 +98,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     e_too_large: "📦 Too large: about {size} (limit {max}).\nTry a lower quality or audio.",
     e_no_space: "💾 The server is low on disk space — try again later.",
     e_timeout: "⏱ Timed out after {min} min.",
+    e_probe_timeout: "⏱ The source site took too long to respond — possible network or connectivity issue.",
     e_upload: "❌ Telegram didn't accept the file ({size}).",
     e_upload_big: "📦 The file is {size} — over the {max} upload limit.",
     e_internal: "❌ Internal error. Details are in the bot's log.",

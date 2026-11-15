@@ -11,6 +11,7 @@ mod config;
 mod i18n;
 mod logger;
 mod media;
+mod meta;
 mod plugins;
 mod proc;
 mod state;
@@ -153,14 +154,23 @@ async fn register_commands(app: Arc<App>) {
 /// download is running: all slots are held during the update.
 async fn updater(app: Arc<App>) {
     let Some(cmdline) = app.cfg.ytdlp_update_cmd.clone() else { return };
-    let parts: Vec<String> = cmdline.split_whitespace().map(str::to_string).collect();
-    let Some((program, args)) = parts.split_first() else { return };
     let mut delay = Duration::from_secs(120);
     loop {
         tokio::time::sleep(delay).await;
         let Ok(_all) = app.slots.acquire_many(app.cfg.max_parallel as u32).await else { return };
-        let mut cmd = proc::command(program, app.cfg.child_nice);
-        cmd.args(args).stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = proc::command("sh", app.cfg.child_nice);
+            c.arg("-c").arg(&cmdline);
+            c
+        };
+        #[cfg(not(unix))]
+        let mut cmd = {
+            let mut c = proc::command("cmd", app.cfg.child_nice);
+            c.arg("/C").arg(&cmdline);
+            c
+        };
+        cmd.stderr(std::process::Stdio::piped());
         match proc::capture(cmd, Duration::from_secs(600)).await {
             Ok((out, _)) if out.ok => {
                 log::info!("yt-dlp update ok: {}", ytdlp::version(&app.cfg).await.unwrap_or_default())

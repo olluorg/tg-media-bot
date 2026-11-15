@@ -37,6 +37,7 @@ impl Resolved {
         NetOpts {
             cookies: false,
             proxy: false,
+            force_ipv4: false,
             referer: self.referer.clone(),
             headers: self.headers.clone(),
             file_urls: self.url.starts_with("file://"),

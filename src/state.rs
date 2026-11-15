@@ -18,6 +18,8 @@ use crate::types::Quality;
 /// Upper bound on cache keys; the oldest tenth is dropped when exceeded.
 /// An entry is ~200 bytes, so this is a few MB at most.
 const MAX_CACHE: usize = 20_000;
+/// Upper bound on cached titles; the oldest tenth is dropped when exceeded.
+const MAX_TITLES: usize = 10_000;
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -69,6 +71,13 @@ pub struct SavedJob {
     pub created_at: u64,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct TitleEntry {
+    pub title: String,
+    #[serde(default)]
+    pub ts: u64,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct Data {
     #[serde(default)]
@@ -81,6 +90,8 @@ struct Data {
     audio_users: Vec<i64>,
     #[serde(default)]
     cache: HashMap<String, CacheEntry>,
+    #[serde(default)]
+    titles: HashMap<String, TitleEntry>,
     #[serde(default)]
     jobs: HashMap<String, SavedJob>,
 }
@@ -232,10 +243,62 @@ impl Store {
         self.with(|d| d.cache.len())
     }
 
+    /// First hit among `keys`, checking both title cache and media cache.
+    pub fn find_cached_title(&self, keys: &[String]) -> Option<String> {
+        for key in keys {
+            if let Some(t) = self.title_find(key) {
+                if !t.trim().is_empty() {
+                    return Some(t);
+                }
+            }
+            if let Some(entry) = self.with(|d| d.cache.get(key).cloned()) {
+                if !entry.title.trim().is_empty() {
+                    return Some(entry.title);
+                }
+            }
+        }
+        None
+    }
+
+    /// Look up a title in the evicting title cache. Updates access time (LRU).
+    pub fn title_find(&self, key: &str) -> Option<String> {
+        let now = now_secs();
+        self.with(|d| {
+            if let Some(entry) = d.titles.get_mut(key) {
+                entry.ts = now;
+                Some(entry.title.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Store a title in the evicting title cache. When MAX_TITLES is exceeded,
+    /// the oldest 10% is evicted.
+    pub fn title_put(&self, key: &str, title: &str) {
+        let trimmed = title.trim();
+        if key.is_empty() || trimmed.is_empty() {
+            return;
+        }
+        let ts = now_secs();
+        self.with(|d| {
+            d.titles.insert(key.to_string(), TitleEntry { title: trimmed.to_string(), ts });
+            if d.titles.len() > MAX_TITLES {
+                let mut oldest: Vec<(u64, String)> = d.titles.iter().map(|(k, e)| (e.ts, k.clone())).collect();
+                oldest.sort_unstable();
+                for (_, k) in oldest.into_iter().take(MAX_TITLES / 10) {
+                    d.titles.remove(&k);
+                }
+            }
+        });
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
     pub fn clear_cache(&self) -> usize {
         let count = self.with(|d| {
-            let len = d.cache.len();
+            let len = d.cache.len() + d.titles.len();
             d.cache.clear();
+            d.titles.clear();
             len
         });
         if count > 0 {
@@ -475,6 +538,19 @@ mod tests {
             store.cache_put(&[format!("url:https://a.com/{i}|v@max")], entry(&i.to_string()));
         }
         assert!(store.with(|d| d.cache.len()) <= MAX_CACHE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_cache_is_bounded_and_evicts() {
+        let dir = temp_dir("title-bounded");
+        let store = Store::load(&dir);
+        for i in 0..(MAX_TITLES + 50) {
+            store.title_put(&format!("key_{i}"), &format!("Title {i}"));
+        }
+        assert!(store.with(|d| d.titles.len()) <= MAX_TITLES);
+        // The most recently added entries must be present
+        assert_eq!(store.title_find(&format!("key_{}", MAX_TITLES + 40)), Some(format!("Title {}", MAX_TITLES + 40)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

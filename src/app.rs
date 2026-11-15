@@ -131,6 +131,7 @@ pub struct App {
     pub bot: Bot,
     pub store: Store,
     pub plugins: Plugins,
+    pub meta: Arc<crate::meta::TitleResolver>,
     /// Global download slots (MAX_PARALLEL_DOWNLOADS).
     pub slots: Semaphore,
     /// Upload slots to stream to Telegram concurrently without blocking new downloads.
@@ -325,7 +326,10 @@ fn error_text(t: &Strings, cfg: &Config, err: &JobError, url: &str) -> String {
             Some(hint) => hint_text(t, hint).to_string(),
             None => format!("<code>{}</code>", html_escape(util::truncate_chars(raw, 300))),
         },
-        JobError::Dl(DlError::Timeout) => fill(t.e_timeout, &[("min", &(cfg.download_timeout / 60).to_string())]),
+        JobError::Dl(DlError::DownloadTimeout) => {
+            fill(t.e_timeout, &[("min", &(cfg.download_timeout / 60).to_string())])
+        }
+        JobError::Dl(DlError::ProbeTimeout) => t.e_probe_timeout.to_string(),
         JobError::Dl(DlError::Internal(_)) => t.e_internal.to_string(),
         JobError::NoSpace => t.e_no_space.to_string(),
         JobError::TooBigToSend(size) => fill(
@@ -407,6 +411,7 @@ impl App {
             bot,
             store,
             plugins,
+            meta: Arc::new(crate::meta::TitleResolver::new()),
             slots,
             upload_slots,
             user_slots: Mutex::new(HashMap::new()),
@@ -533,12 +538,8 @@ impl App {
             id = self.new_id(self.next_seq());
         }
         let (stage, _) = watch::channel(Stage::Queued);
-        let cached_title = self
-            .store
-            .cache_find(std::slice::from_ref(&key))
-            .or_else(|| self.store.cache_find(std::slice::from_ref(&video_key)))
-            .map(|e| e.title)
-            .filter(|t| !t.trim().is_empty());
+        let cached_title =
+            self.store.find_cached_title(&[key.clone(), video_key.clone()]).filter(|t| !t.trim().is_empty());
         let job = Arc::new(Job {
             id: id.clone(),
             seq,
@@ -550,11 +551,11 @@ impl App {
             lang: req.lang,
             minimal,
             user_msg_id: req.user_msg_id,
-            video_key,
+            video_key: video_key.clone(),
             key,
             stage,
             sent: Arc::new(AtomicU64::new(0)),
-            title: Mutex::new(cached_title),
+            title: Mutex::new(cached_title.clone()),
         });
         log::info!(
             "job {} queued: user={} chat={} quality={} url={}",
@@ -583,6 +584,26 @@ impl App {
         let handle = tokio::spawn(run_job(self.clone(), job.clone()));
         if let Some(entry) = jobs.get_mut(&id) {
             entry.abort = Some(handle.abort_handle());
+        }
+        if cached_title.is_none() {
+            let app = self.clone();
+            let job_arc = job.clone();
+            let url = req.url.clone();
+            let vkey = video_key.clone();
+            tokio::spawn(async move {
+                if let Some(title) = app.meta.resolve(&url).await {
+                    job_arc.set_title(&title);
+                    app.store.title_put(&vkey, &title);
+                    log::debug!("resolved title for job {}: {title}", job_arc.id);
+                    if let Some(msg_id) = app.status_msg(&job_arc.id) {
+                        if !job_arc.minimal {
+                            let markup = cancel_markup(job_arc.lang.t(), &job_arc.id);
+                            let text = render_status(&job_arc);
+                            app.edit_status(job_arc.chat_id, msg_id, &text, Some(markup)).await;
+                        }
+                    }
+                }
+            });
         }
         Ok(job)
     }
@@ -958,7 +979,10 @@ impl App {
             }
             let no_lookup = |_: &Probed| None;
             let lookup: ytdlp::Lookup<'_> = if round == 0 { &lookup } else { &no_lookup };
-            let on_title = |t: &str| job.set_title(t);
+            let on_title = |t: &str| {
+                job.set_title(t);
+                self.store.title_put(&job.video_key, t);
+            };
             let outcome =
                 ytdlp::fetch(&self.cfg, &self.plugins, &job.url, kind, cap, dir, &job.stage, lookup, &on_title)
                     .await
@@ -966,6 +990,7 @@ impl App {
             match outcome {
                 Outcome::Cached(entry, probed) => {
                     job.set_title(&entry.title);
+                    self.store.title_put(&job.video_key, &entry.title);
                     drop(dl_slot.take());
                     if self.send_cached(job, &entry).await {
                         log::info!("job {} served from cache after probe ({:?})", job.id, probed.video_key);
@@ -975,6 +1000,7 @@ impl App {
                 }
                 Outcome::Downloaded(fetched) => {
                     job.set_title(&fetched.title);
+                    self.store.title_put(&job.video_key, &fetched.title);
                     let ready = media::prepare(&self.cfg, fetched, &job.stage).await;
                     // Release the download slot so the next item in the queue can start
                     // downloading while this file is being streamed to Telegram.
@@ -1022,6 +1048,7 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
     }
     if let Some(entry) = app.store.cache_find(&initial_keys) {
         job.set_title(&entry.title);
+        app.store.title_put(&job.video_key, &entry.title);
         if app.send_cached(&job, &entry).await {
             log::info!("job {} served from cache", job.id);
             if let Some(msg) = app.status_msg(&job.id) {
@@ -1146,6 +1173,10 @@ mod tests {
         assert!(text.contains(ru.e_private));
         let text = error_text(Lang::En.t(), &cfg, &JobError::Dl(DlError::Failed("weird <thing>".into())), url);
         assert!(text.contains("<code>weird &lt;thing&gt;</code>"));
+        let text = error_text(ru, &cfg, &JobError::Dl(DlError::DownloadTimeout), url);
+        assert!(text.contains(&ru.e_timeout.replace("{min}", "30")));
+        let text = error_text(ru, &cfg, &JobError::Dl(DlError::ProbeTimeout), url);
+        assert!(text.contains(ru.e_probe_timeout));
     }
 
     fn job(url: &str, quality: Quality) -> Job {
