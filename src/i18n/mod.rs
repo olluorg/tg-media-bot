@@ -37,11 +37,12 @@ strings! {
     topic_groups_only, topic_lock_outside, topic_locked, topic_unlocked, topic_none, topic_status, topic_usage,
     // quality picker
     formats_usage, ask_quality, ask_quality_many, queued_n, picker_expired, not_yours,
-    btn_max, btn_audio, btn_ask, btn_cancel,
+    btn_max, btn_audio, btn_ask, btn_cancel, btn_cancel_all,
     // queueing
     invalid_url, private_url, user_queue_full, queue_partial, queue_full, duplicate,
     // stages
     st_queued, st_waiting, st_probing, st_downloading, st_processing, st_transcoding, st_uploading,
+    st_title_pending,
     // errors
     err_title, e_age, e_bot, e_private, e_members, e_login, e_format, e_unavailable, e_unsupported,
     e_no_media, e_404, e_403, e_rate, e_network, e_geo, e_drm, e_live, e_too_long, e_too_large,

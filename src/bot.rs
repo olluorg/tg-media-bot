@@ -59,6 +59,59 @@ fn default_keyboard(t: &Strings, max_height: u32) -> Value {
     json!({ "inline_keyboard": rows })
 }
 
+fn status_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
+    let t = lang.t();
+    let jobs = app.user_jobs(user_id);
+    let mut text = fill(t.status_header, &[("n", &jobs.len().to_string()), ("max", &app.cfg.user_queue.to_string())]);
+    let mut ordered: Vec<_> = jobs.iter().collect();
+    ordered.sort_by_key(|j| (*j.stage.borrow() == Stage::Queued, j.seq));
+
+    let mut buttons: Vec<Value> = Vec::new();
+    for job in ordered.iter().take(STATUS_LINES) {
+        let stage = job.stage.borrow().clone();
+        let title_line = match job.title() {
+            Some(title) if !title.trim().is_empty() => {
+                format!("  🎬 <b>{}</b>\n", util::html_escape(util::truncate_chars(&title, 80)))
+            }
+            _ => format!("  🎬 <i>{}</i>\n", t.st_title_pending),
+        };
+        text.push_str(&format!(
+            "\n\n• <code>{}</code> {} · {}\n{}  🔗 {}",
+            job.id,
+            stage_label(t, &stage),
+            job.quality.label(t),
+            title_line,
+            util::html_escape(util::truncate_chars(&job.url, 70))
+        ));
+
+        let btn_label = match job.title() {
+            Some(title) if !title.trim().is_empty() => {
+                format!("✖ {} · {}", job.id, util::truncate_chars(&title, 20))
+            }
+            _ => format!("✖ {}", job.id),
+        };
+        buttons.push(json!({
+            "text": btn_label,
+            "callback_data": format!("c:{}", job.id),
+        }));
+    }
+
+    if jobs.len() > STATUS_LINES {
+        text.push('\n');
+        text.push_str(&fill(t.status_more, &[("n", &(jobs.len() - STATUS_LINES).to_string())]));
+    }
+
+    let mut rows: Vec<Vec<Value>> = buttons.into_iter().map(|b| vec![b]).collect();
+    if jobs.len() > 1 {
+        rows.push(vec![json!({
+            "text": t.btn_cancel_all,
+            "callback_data": "c:all",
+        })]);
+    }
+
+    (text, json!({ "inline_keyboard": rows }))
+}
+
 fn quality_name(t: &Strings, q: Option<Quality>) -> String {
     q.map(|q| q.label(t)).unwrap_or_else(|| t.word_ask.to_string())
 }
@@ -349,26 +402,8 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 app.say(chat, thread, t.status_empty, None).await;
                 return;
             }
-            let mut text =
-                fill(t.status_header, &[("n", &jobs.len().to_string()), ("max", &app.cfg.user_queue.to_string())]);
-            // Running first, then the queue in order.
-            let mut ordered: Vec<_> = jobs.iter().collect();
-            ordered.sort_by_key(|j| (*j.stage.borrow() == Stage::Queued, j.seq));
-            for job in ordered.iter().take(STATUS_LINES) {
-                let stage = job.stage.borrow().clone();
-                text.push_str(&format!(
-                    "\n• <code>{}</code> {} · {} · {}",
-                    job.id,
-                    stage_label(t, &stage),
-                    job.quality.label(t),
-                    util::html_escape(util::truncate_chars(&job.url, 60))
-                ));
-            }
-            if jobs.len() > STATUS_LINES {
-                text.push('\n');
-                text.push_str(&fill(t.status_more, &[("n", &(jobs.len() - STATUS_LINES).to_string())]));
-            }
-            app.say(chat, thread, &text, None).await;
+            let (text, markup) = status_menu(app, ctx.user, ctx.lang);
+            app.say(chat, thread, &text, Some(markup)).await;
         }
         "cancel" => {
             let id = match first.as_deref() {
@@ -549,12 +584,45 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 log::debug!("edit after quality change failed: {e}");
             }
         }
-        "c" => match app.cancel(rest, cb.from.id).await {
-            Cancel::Done => app.bot.answer_callback(&cb.id, Some(t.cancelled), false).await,
-            Cancel::Denied => app.bot.answer_callback(&cb.id, Some(t.cancel_denied), true).await,
-            // Already finished; nothing to do.
-            Cancel::NotFound => app.bot.answer_callback(&cb.id, None, false).await,
-        },
+        "c" => {
+            let is_status_list = msg.text.as_deref().is_some_and(|txt| txt.starts_with("📊"));
+            if rest == "all" {
+                let n = app.cancel_all(cb.from.id).await;
+                let text = fill(t.cancelled_n, &[("n", &n.to_string())]);
+                app.bot.answer_callback(&cb.id, Some(&text), false).await;
+                if is_status_list {
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, t.status_empty, None).await;
+                }
+                return;
+            }
+            match app.cancel(rest, cb.from.id).await {
+                Cancel::Done => {
+                    app.bot.answer_callback(&cb.id, Some(t.cancelled), false).await;
+                    if is_status_list {
+                        let remaining = app.user_jobs(cb.from.id);
+                        if remaining.is_empty() {
+                            let _ = app.bot.edit_message(msg.chat.id, msg.message_id, t.status_empty, None).await;
+                        } else {
+                            let (text, markup) = status_menu(app, cb.from.id, lang);
+                            let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(markup)).await;
+                        }
+                    }
+                }
+                Cancel::Denied => app.bot.answer_callback(&cb.id, Some(t.cancel_denied), true).await,
+                Cancel::NotFound => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    if is_status_list {
+                        let remaining = app.user_jobs(cb.from.id);
+                        if remaining.is_empty() {
+                            let _ = app.bot.edit_message(msg.chat.id, msg.message_id, t.status_empty, None).await;
+                        } else {
+                            let (text, markup) = status_menu(app, cb.from.id, lang);
+                            let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(markup)).await;
+                        }
+                    }
+                }
+            }
+        }
         _ => app.bot.answer_callback(&cb.id, None, false).await,
     }
 }
@@ -592,7 +660,47 @@ mod tests {
         assert_eq!(command_list(Lang::Ru.t()).len(), 9);
         let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080)).unwrap();
         let lq_str = lq.to_string();
-        assert!(lq_str.contains("q:tok:720") && lq_str.contains("q:tok:480") && lq_str.contains("q:tok:360") && lq_str.contains("q:tok:audio"));
+        assert!(
+            lq_str.contains("q:tok:720")
+                && lq_str.contains("q:tok:480")
+                && lq_str.contains("q:tok:360")
+                && lq_str.contains("q:tok:audio")
+        );
         assert!(crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Audio).is_none());
+    }
+
+    #[tokio::test]
+    async fn status_menu_renders_and_fits_limits() {
+        let env = crate::config::Env::from_pairs(&[("BOT_TOKEN", "123:abc")]);
+        let cfg = crate::config::Config::from_env(&env).unwrap();
+        let bot = crate::telegram::Bot::new(&cfg).unwrap();
+        let store = crate::state::Store::load(&cfg.data_dir);
+        let plugins = crate::plugins::Plugins::load(None);
+        let app = Arc::new(App::new(cfg, bot, store, plugins));
+
+        let req = Request {
+            chat_id: 10,
+            thread_id: None,
+            user_id: 42,
+            url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
+            quality: Quality::Max,
+            lang: Lang::Ru,
+            status_msg: None,
+            user_msg_id: None,
+        };
+        let job = app.enqueue(req).unwrap();
+        job.set_title("Rick Astley - Never Gonna Give You Up");
+
+        let (text, kb) = status_menu(&app, 42, Lang::Ru);
+        assert!(text.contains("Rick Astley - Never Gonna Give You Up"));
+        assert!(text.contains(&job.id));
+        assert!(text.contains("📊 <b>Твоя очередь</b> (1/100)"));
+
+        for row in kb["inline_keyboard"].as_array().unwrap() {
+            for b in row.as_array().unwrap() {
+                assert!(b["callback_data"].as_str().unwrap().len() <= 64);
+                assert!(b["callback_data"].as_str().unwrap().starts_with("c:"));
+            }
+        }
     }
 }

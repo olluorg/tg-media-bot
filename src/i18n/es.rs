@@ -57,6 +57,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud y más 
     btn_audio: "🎵 Audio",
     btn_ask: "❓ Preguntar",
     btn_cancel: "✖ Cancelar",
+    btn_cancel_all: "✖ Cancelar todo",
 
     invalid_url: "❌ Eso no parece un enlace válido.",
     private_url: "⛔ No se permiten enlaces a direcciones locales o privadas.",
@@ -72,6 +73,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud y más 
     st_processing: "🔄 Procesando",
     st_transcoding: "🎞 Convirtiendo",
     st_uploading: "📤 Enviando",
+    st_title_pending: "obteniendo título…",
 
     err_title: "❌ <b>No se pudo descargar</b>",
     e_age: "🔞 Restringido por edad. El dueño del bot debe configurar COOKIES_FILE con una cuenta con sesión iniciada.",

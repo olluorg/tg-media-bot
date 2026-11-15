@@ -125,7 +125,10 @@ pub fn normalize_url(url: &str) -> String {
     let Some((base, query)) = no_frag.split_once('?') else {
         return no_frag.to_string();
     };
-    const TRACKING: [&str; 9] = ["si", "feature", "igsh", "igshid", "fbclid", "gclid", "ref_src", "ref_url", "pp"];
+    const TRACKING: [&str; 18] = [
+        "si", "feature", "igsh", "igshid", "fbclid", "gclid", "ref_src", "ref_url", "pp",
+        "ysclid", "dnt", "origin", "source", "context", "sender_device", "is_from_webapp", "t", "time_continue",
+    ];
     let kept: Vec<&str> = query
         .split('&')
         .filter(|p| {

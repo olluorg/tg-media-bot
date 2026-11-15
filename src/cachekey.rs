@@ -32,7 +32,7 @@ pub fn local_video_key(url: &str) -> Option<String> {
         "youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtube-nocookie.com" => {
             let id = match segs.as_slice() {
                 ["watch", ..] => param("v"),
-                ["shorts" | "embed" | "live" | "v", id, ..] => Some(*id),
+                ["shorts" | "embed" | "live" | "v" | "clip", id, ..] => Some(*id),
                 _ => None,
             };
             ("youtube", id.filter(|id| is_youtube_id(id))?)
@@ -61,9 +61,36 @@ pub fn local_video_key(url: &str) -> Option<String> {
             _ => return None,
         },
         "redd.it" => ("reddit", segs.first().copied().filter(|id| is_word(id))?),
+        "vk.com" | "m.vk.com" | "vkvideo.ru" => {
+            let raw = segs.first().copied().or_else(|| param("z"))?;
+            let id = raw.strip_prefix("video").or_else(|| raw.strip_prefix("clip"))?;
+            if is_vk_id(id) {
+                ("vk", id)
+            } else {
+                return None;
+            }
+        }
+        "rutube.ru" => match segs.as_slice() {
+            ["video", id, ..] if is_word(id) => ("rutube", *id),
+            _ => return None,
+        },
+        "coub.com" => match segs.as_slice() {
+            ["view", id, ..] if is_word(id) => ("coub", *id),
+            _ => return None,
+        },
+        "pinterest.com" | "pinterest.ru" => match segs.as_slice() {
+            ["pin", id, ..] if is_digits(id) => ("pinterest", *id),
+            _ => return None,
+        },
         _ => return None,
     };
     Some(format!("{site}:{id}"))
+}
+
+fn is_vk_id(s: &str) -> bool {
+    let s = s.strip_prefix('-').unwrap_or(s);
+    let Some((owner, item)) = s.split_once('_') else { return false };
+    is_digits(owner) && is_digits(item)
 }
 
 fn is_youtube_id(s: &str) -> bool {
@@ -149,6 +176,12 @@ mod tests {
             ("https://player.vimeo.com/video/76979871?h=abc", Some("vimeo:76979871")),
             ("https://www.reddit.com/r/videos/comments/1abcde/some_title/", Some("reddit:1abcde")),
             ("https://redd.it/1abcde", Some("reddit:1abcde")),
+            ("https://vk.com/video-123456_789012", Some("vk:-123456_789012")),
+            ("https://vk.com/clip-123456_789012", Some("vk:-123456_789012")),
+            ("https://vkvideo.ru/video-123456_789012?list=abc", Some("vk:-123456_789012")),
+            ("https://rutube.ru/video/abcdef1234567890abcdef1234567890/", Some("rutube:abcdef1234567890abcdef1234567890")),
+            ("https://coub.com/view/2v1a3b", Some("coub:2v1a3b")),
+            ("https://www.pinterest.com/pin/123456789/", Some("pinterest:123456789")),
             ("https://example.com/watch/1", None),
         ];
         for (url, want) in cases {

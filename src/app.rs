@@ -24,7 +24,7 @@ use crate::plugins::Plugins;
 use crate::state::{CacheEntry, Store};
 use crate::sys;
 use crate::telegram::{Bot, Media, MediaKind, Message, Source, TgError, User};
-use crate::types::{Quality, Stage};
+use crate::types::{Kind, Quality, Stage};
 use crate::util::{self, html_escape};
 use crate::ytdlp::{self, DlError, Hint, Outcome, Probed, Reject};
 
@@ -54,6 +54,21 @@ pub struct Job {
     pub stage: watch::Sender<Stage>,
     /// Bytes of the current upload that have left the process.
     pub sent: Arc<AtomicU64>,
+    pub title: Mutex<Option<String>>,
+}
+
+impl Job {
+    pub fn title(&self) -> Option<String> {
+        lock(&self.title).clone()
+    }
+
+    pub fn set_title(&self, title: impl Into<String>) {
+        let s = title.into();
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            *lock(&self.title) = Some(trimmed.to_string());
+        }
+    }
 }
 
 struct Entry {
@@ -231,6 +246,11 @@ pub fn render_status(job: &Job) -> String {
     let t = job.lang.t();
     let stage = job.stage.borrow().clone();
     let mut text = format!("<b>{}</b> · {}", stage_label(t, &stage), job.quality.label(t));
+    if let Some(title) = job.title() {
+        if !title.trim().is_empty() {
+            text.push_str(&format!("\n🎬 <b>{}</b>", html_escape(&title)));
+        }
+    }
     let bar = |pct: f32| format!("\n<code>{}</code> {pct:.0}%", util::progress_bar(pct));
     match stage {
         Stage::Downloading { pct, speed, eta } => {
@@ -477,6 +497,12 @@ impl App {
             id = self.new_id(self.next_seq());
         }
         let (stage, _) = watch::channel(Stage::Queued);
+        let cached_title = self
+            .store
+            .cache_find(std::slice::from_ref(&key))
+            .or_else(|| self.store.cache_find(std::slice::from_ref(&video_key)))
+            .map(|e| e.title)
+            .filter(|t| !t.trim().is_empty());
         let job = Arc::new(Job {
             id: id.clone(),
             seq,
@@ -492,6 +518,7 @@ impl App {
             key,
             stage,
             sent: Arc::new(AtomicU64::new(0)),
+            title: Mutex::new(cached_title),
         });
         log::info!(
             "job {} queued: user={} chat={} quality={} url={}",
@@ -756,19 +783,19 @@ impl App {
             if dl_slot.is_none() {
                 job.stage.send_replace(Stage::Waiting);
                 dl_slot = Some(
-                    self.slots
-                        .acquire()
-                        .await
-                        .map_err(|_| JobError::Dl(DlError::Internal("shutting down".into())))?,
+                    self.slots.acquire().await.map_err(|_| JobError::Dl(DlError::Internal("shutting down".into())))?,
                 );
             }
             let no_lookup = |_: &Probed| None;
             let lookup: ytdlp::Lookup<'_> = if round == 0 { &lookup } else { &no_lookup };
-            let outcome = ytdlp::fetch(&self.cfg, &self.plugins, &job.url, kind, cap, dir, &job.stage, lookup)
-                .await
-                .map_err(JobError::Dl)?;
+            let on_title = |t: &str| job.set_title(t);
+            let outcome =
+                ytdlp::fetch(&self.cfg, &self.plugins, &job.url, kind, cap, dir, &job.stage, lookup, &on_title)
+                    .await
+                    .map_err(JobError::Dl)?;
             match outcome {
                 Outcome::Cached(entry, probed) => {
+                    job.set_title(&entry.title);
                     drop(dl_slot.take());
                     if self.send_cached(job, &entry).await {
                         log::info!("job {} served from cache after probe ({:?})", job.id, probed.video_key);
@@ -777,6 +804,7 @@ impl App {
                     }
                 }
                 Outcome::Downloaded(fetched) => {
+                    job.set_title(&fetched.title);
                     let ready = media::prepare(&self.cfg, fetched, &job.stage).await;
                     // Release the download slot so the next item in the queue can start
                     // downloading while this file is being streamed to Telegram.
@@ -816,7 +844,14 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
     let started = Instant::now();
 
     // 1. Same video (any spelling of the link) already sent: no queue at all.
-    if let Some(entry) = app.store.cache_find(std::slice::from_ref(&job.key)) {
+    let mut initial_keys = vec![job.key.clone()];
+    if let Quality::Height(h) = job.quality {
+        initial_keys.push(cachekey::delivered_key(&job.video_key, Kind::Video, Some(h)));
+    } else if job.quality == Quality::Audio {
+        initial_keys.push(cachekey::delivered_key(&job.video_key, Kind::Audio, None));
+    }
+    if let Some(entry) = app.store.cache_find(&initial_keys) {
+        job.set_title(&entry.title);
         if app.send_cached(&job, &entry).await {
             log::info!("job {} served from cache", job.id);
             if let Some(msg) = app.status_msg(&job.id) {
@@ -873,27 +908,26 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                 JobError::Dl(e) => log::info!("job {} failed: {e:?}", job.id),
                 JobError::NoSpace | JobError::TooBigToSend(_) => log::warn!("job {} refused", job.id),
             }
-            let is_size_error = matches!(
-                &err,
-                JobError::TooBigToSend(_) | JobError::Dl(DlError::Rejected(Reject::TooLarge { .. }))
-            ) || match &err {
-                JobError::Dl(DlError::Failed(raw)) => {
-                    let low = raw.to_lowercase();
-                    low.contains("too large")
-                        || low.contains("exceeds")
-                        || low.contains("upload limit")
-                        || low.contains("max-filesize")
-                        || low.contains("file is larger")
-                }
-                JobError::Upload { err, .. } => {
-                    let desc = match err {
-                        crate::telegram::TgError::Api { desc, .. } => desc.to_lowercase(),
-                        crate::telegram::TgError::Net(s) => s.to_lowercase(),
+            let is_size_error =
+                matches!(&err, JobError::TooBigToSend(_) | JobError::Dl(DlError::Rejected(Reject::TooLarge { .. })))
+                    || match &err {
+                        JobError::Dl(DlError::Failed(raw)) => {
+                            let low = raw.to_lowercase();
+                            low.contains("too large")
+                                || low.contains("exceeds")
+                                || low.contains("upload limit")
+                                || low.contains("max-filesize")
+                                || low.contains("file is larger")
+                        }
+                        JobError::Upload { err, .. } => {
+                            let desc = match err {
+                                crate::telegram::TgError::Api { desc, .. } => desc.to_lowercase(),
+                                crate::telegram::TgError::Net(s) => s.to_lowercase(),
+                            };
+                            desc.contains("too large") || desc.contains("too big") || desc.contains("entity too large")
+                        }
+                        _ => false,
                     };
-                    desc.contains("too large") || desc.contains("too big") || desc.contains("entity too large")
-                }
-                _ => false,
-            };
 
             let markup = if is_size_error {
                 let token = app.stash_urls(job.user_id, vec![job.url.clone()], job.user_msg_id);
@@ -958,6 +992,7 @@ mod tests {
             video_key,
             stage: watch::channel(Stage::Queued).0,
             sent: Arc::new(AtomicU64::new(0)),
+            title: Mutex::new(None),
         }
     }
 

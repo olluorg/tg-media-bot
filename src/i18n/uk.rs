@@ -57,6 +57,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud і ще
     btn_audio: "🎵 Аудіо",
     btn_ask: "❓ Питати",
     btn_cancel: "✖ Скасувати",
+    btn_cancel_all: "✖ Скасувати все",
 
     invalid_url: "❌ Це не схоже на коректне посилання.",
     private_url: "⛔ Посилання на локальні та внутрішні адреси заборонені.",
@@ -72,6 +73,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud і ще
     st_processing: "🔄 Обробляю",
     st_transcoding: "🎞 Конвертую",
     st_uploading: "📤 Надсилаю",
+    st_title_pending: "назва визначається…",
 
     err_title: "❌ <b>Не вдалося завантажити</b>",
     e_age: "🔞 Вікове обмеження. Власнику бота потрібно задати COOKIES_FILE від авторизованого акаунта.",

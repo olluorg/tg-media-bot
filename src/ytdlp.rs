@@ -706,9 +706,14 @@ async fn attempt(
     dir: &Path,
     stage: &watch::Sender<Stage>,
     lookup: Lookup<'_>,
+    on_title: &(dyn Fn(&str) + Send + Sync),
 ) -> Result<Outcome, DlError> {
     stage.send_replace(Stage::Probing);
     let info = probe(cfg, target, net, dir).await?;
+    let title = info.track.as_deref().or(info.title.as_deref()).unwrap_or("");
+    if !title.is_empty() {
+        on_title(title);
+    }
     check(&info, cfg).map_err(DlError::Rejected)?;
     let kind = if info.audio_only() { Kind::Audio } else { kind };
     let plan =
@@ -720,6 +725,9 @@ async fn attempt(
         height: plan.height,
     };
     if let Some(entry) = lookup(&probed) {
+        if !entry.title.is_empty() {
+            on_title(&entry.title);
+        }
         return Ok(Outcome::Cached(entry, probed));
     }
 
@@ -751,6 +759,7 @@ pub async fn fetch(
     dir: &Path,
     stage: &watch::Sender<Stage>,
     lookup: Lookup<'_>,
+    on_title: &(dyn Fn(&str) + Send + Sync),
 ) -> Result<Outcome, DlError> {
     let mut target = url.to_string();
     let mut net = NetOpts { cookies: cfg.has_cookies(), ..NetOpts::default() };
@@ -766,7 +775,7 @@ pub async fn fetch(
 
     for _ in 0..MAX_ATTEMPTS {
         clear_dir(dir);
-        let raw = match attempt(cfg, &target, &net, kind, cap, dir, stage, lookup).await {
+        let raw = match attempt(cfg, &target, &net, kind, cap, dir, stage, lookup, on_title).await {
             Ok(outcome) => return Ok(outcome),
             Err(DlError::Failed(raw)) => raw,
             Err(other) => return Err(other),
