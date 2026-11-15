@@ -136,8 +136,7 @@ jobs:
             type=edge,branch=master
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'deno') }}
-            type=raw,value=deno,enable=${{ contains(github.ref, 'deno') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
       - name: Create manifest list
         working-directory: ${{ runner.temp }}/digests

@@ -45,7 +45,10 @@ ENV PATH=/opt/yt-dlp/bin:$PATH \
     DATA_DIR=/data \
     TEMP_DIR=/data/tmp \
     YTDLP_UPDATE_CMD="/opt/yt-dlp/bin/pip install --no-cache-dir -q -U yt-dlp[default] && /opt/yt-dlp/bin/python -m compileall -q /opt/yt-dlp" \
-    MALLOC_ARENA_MAX=2
+    MALLOC_ARENA_MAX=2 \
+    DENO_NO_UPDATE_CHECK=1 \
+    DENO_DIR=/data/tmp/deno_cache \
+    DENO_V8_FLAGS="--jitless --max-old-space-size=64"
 
 USER app
 WORKDIR /data
