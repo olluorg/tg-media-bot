@@ -260,8 +260,67 @@ async fn convert(
     }
 }
 
+fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 4 || data[0] != 0xff || data[1] != 0xd8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 1 < data.len() {
+        if data[i] != 0xff {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        i += 2;
+        if marker == 0xff || marker == 0x00 {
+            continue;
+        }
+        if marker == 0xd9 || marker == 0xda {
+            break;
+        }
+        if i + 2 > data.len() {
+            break;
+        }
+        let len = u16::from_be_bytes([data[i], data[i + 1]]) as usize;
+        if len < 2 || i + len > data.len() {
+            break;
+        }
+        let is_sof = matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf);
+        if is_sof && len >= 7 {
+            let height = u16::from_be_bytes([data[i + 3], data[i + 4]]) as u32;
+            let width = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+            return Some((width, height));
+        }
+        i += len;
+    }
+    None
+}
+
+fn already_valid_thumb(src: &Path) -> bool {
+    let ext = src.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase());
+    if !matches!(ext.as_deref(), Some("jpg" | "jpeg")) {
+        return false;
+    }
+    let Ok(meta) = src.metadata() else { return false };
+    let size = meta.len();
+    if size == 0 || size > THUMB_MAX_BYTES {
+        return false;
+    }
+    let Ok(data) = std::fs::read(src) else { return false };
+    if let Some((w, h)) = jpeg_dimensions(&data) {
+        if w <= 320 && h <= 320 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Shrink cover art to Telegram's thumbnail limits. Failure is non-fatal.
 async fn make_thumb(cfg: &Config, src: &Path) -> Option<PathBuf> {
+    if already_valid_thumb(src) {
+        log::debug!("cover art already fits thumbnail limits: {}", src.display());
+        return Some(src.to_path_buf());
+    }
     let dst = src.with_file_name("thumb.jpg");
     let mut cmd = proc::command(&cfg.ffmpeg_bin, cfg.child_nice);
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-threads", "1", "-i"])
@@ -444,5 +503,16 @@ mod tests {
             ffmpeg_args(Action::Remux { aac: false }, &hevc, &c, Path::new("in.mkv"), Path::new("out.mp4")).join(" ");
         assert!(r.contains("-c:v copy -tag:v hvc1 -c:a copy"));
         assert!(!r.contains("libx264"));
+    }
+
+    #[test]
+    fn parses_jpeg_dimensions() {
+        assert_eq!(jpeg_dimensions(&[]), None);
+        assert_eq!(jpeg_dimensions(&[0xff, 0xd8, 0xff, 0xd9]), None);
+        let mut jpeg = vec![0xff, 0xd8];
+        // SOF0: len=11, precision=8, height=240, width=320, 1 component (grayscale)
+        let sof = [0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0xf0, 0x01, 0x40, 0x01, 0x01, 0x11, 0x00];
+        jpeg.extend_from_slice(&sof);
+        assert_eq!(jpeg_dimensions(&jpeg), Some((320, 240)));
     }
 }

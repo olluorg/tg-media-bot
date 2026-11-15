@@ -223,6 +223,38 @@ impl Store {
             self.dirty.store(true, Ordering::Relaxed);
         }
     }
+
+    /// Write to disk asynchronously without blocking the async runtime thread.
+    pub async fn flush_async(&self) {
+        if !self.dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let bytes = match self.with(|d| serde_json::to_vec(d)) {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!("could not serialize state: {e}");
+                self.dirty.store(true, Ordering::Relaxed);
+                return;
+            }
+        };
+        let path = self.path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| e.to_string())
+        })
+        .await;
+        match result {
+            Ok(Err(e)) => {
+                log::error!("could not save state to {}: {e}", self.path.display());
+                self.dirty.store(true, Ordering::Relaxed);
+            }
+            Err(e) => {
+                log::error!("flush task failed: {e}");
+                self.dirty.store(true, Ordering::Relaxed);
+            }
+            Ok(Ok(())) => {}
+        }
+    }
 }
 
 /// One-time import of the JSON files written by the original Python bot, so an

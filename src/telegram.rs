@@ -217,7 +217,7 @@ impl Bot {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(2)
+            .pool_max_idle_per_host(16)
             .tcp_keepalive(Duration::from_secs(60))
             .user_agent(concat!("tg-media-bot/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -441,7 +441,7 @@ async fn file_part(path: &Path, name: &str, sent: Option<Arc<AtomicU64>>) -> Res
     let io = |e: std::io::Error| TgError::Net(format!("{}: {e}", path.display()));
     let file = tokio::fs::File::open(path).await.map_err(io)?;
     let len = file.metadata().await.map_err(io)?.len();
-    let stream = ReaderStream::with_capacity(file, 64 * 1024).inspect_ok(move |chunk| {
+    let stream = ReaderStream::with_capacity(file, 512 * 1024).inspect_ok(move |chunk| {
         if let Some(counter) = &sent {
             counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         }

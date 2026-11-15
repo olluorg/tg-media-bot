@@ -135,21 +135,28 @@ struct Ctx {
 }
 
 /// Ask which quality to use for `urls` (one question for the whole message).
-async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>) {
+async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, user_msg_id: Option<i64>) {
     let t = ctx.lang.t();
     let text = if urls.len() == 1 {
         t.ask_quality.to_string()
     } else {
         fill(t.ask_quality_many, &[("n", &urls.len().to_string())])
     };
-    let token = app.stash_urls(ctx.user, urls);
+    let token = app.stash_urls(ctx.user, urls, user_msg_id);
     app.say(ctx.chat, ctx.thread, &text, Some(picker_keyboard(t, &token, app.cfg.max_height))).await;
 }
 
 /// Queue `urls` with `quality` and report the result. `picker` is the
 /// question message, if there was one: a single link turns it into its status
 /// message, several links turn it into a summary.
-async fn enqueue_all(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, quality: Quality, picker: Option<i64>) {
+async fn enqueue_all(
+    app: &Arc<App>,
+    ctx: &Ctx,
+    urls: Vec<String>,
+    quality: Quality,
+    picker: Option<i64>,
+    user_msg_id: Option<i64>,
+) {
     let t = ctx.lang.t();
     let single = urls.len() == 1;
     let (mut added, mut skipped) = (0usize, 0usize);
@@ -165,6 +172,7 @@ async fn enqueue_all(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, quality: Qual
             quality,
             lang: ctx.lang,
             status_msg: if single { picker } else { None },
+            user_msg_id,
         };
         match app.enqueue(req) {
             Ok(job) => {
@@ -222,13 +230,25 @@ async fn enqueue_all(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, quality: Qual
         return;
     }
     let text = lines.join("\n");
-    match picker {
+    let summary_msg: Option<i64> = match picker {
         Some(msg) => {
             if app.bot.edit_message(ctx.chat, msg, &text, None).await.is_err() {
-                app.say(ctx.chat, ctx.thread, &text, None).await;
+                app.bot.send_message(ctx.chat, ctx.thread, &text, None).await.ok().map(|m| m.message_id)
+            } else {
+                Some(msg)
             }
         }
-        None => app.say(ctx.chat, ctx.thread, &text, None).await,
+        None => app.bot.send_message(ctx.chat, ctx.thread, &text, None).await.ok().map(|m| m.message_id),
+    };
+    if skipped == 0 && added > 0 {
+        if let Some(msg_id) = summary_msg {
+            let bot = app.bot.clone();
+            let chat_id = ctx.chat;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let _ = bot.delete_message(chat_id, msg_id).await;
+            });
+        }
     }
 }
 
@@ -285,8 +305,8 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
         return;
     }
     match app.store.default_quality(user.id) {
-        Some(q) => enqueue_all(app, &ctx, urls, q, None).await,
-        None => ask_quality(app, &ctx, urls).await,
+        Some(q) => enqueue_all(app, &ctx, urls, q, None, Some(msg.message_id)).await,
+        None => ask_quality(app, &ctx, urls, Some(msg.message_id)).await,
     }
 }
 
@@ -320,7 +340,7 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
             if urls.is_empty() {
                 app.say(chat, thread, t.formats_usage, None).await;
             } else {
-                ask_quality(app, ctx, urls).await;
+                ask_quality(app, ctx, urls, Some(msg.message_id)).await;
             }
         }
         "status" => {
@@ -500,8 +520,8 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 app.bot.answer_callback(&cb.id, None, false).await;
                 return;
             };
-            let urls = match app.take_urls(token, cb.from.id) {
-                Ok(urls) => urls,
+            let (urls, user_msg_id) = match app.take_urls(token, cb.from.id) {
+                Ok(res) => res,
                 Err(true) => {
                     app.bot.answer_callback(&cb.id, Some(t.not_yours), true).await;
                     return;
@@ -513,7 +533,7 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
             };
             app.bot.answer_callback(&cb.id, None, false).await;
             let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: cb.from.id, lang };
-            enqueue_all(app, &ctx, urls, quality, Some(msg.message_id)).await;
+            enqueue_all(app, &ctx, urls, quality, Some(msg.message_id), user_msg_id).await;
         }
         // /quality: remember a default.
         "d" => {

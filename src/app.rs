@@ -45,6 +45,8 @@ pub struct Job {
     pub quality: Quality,
     pub lang: Lang,
     pub minimal: bool,
+    /// Message id of the user's request, to delete once the artifact is delivered.
+    pub user_msg_id: Option<i64>,
     /// Video identity from the link alone (`youtube:<id>` or `url:<url>`).
     pub video_key: String,
     /// Cache key of this request.
@@ -69,6 +71,8 @@ pub struct Request {
     pub lang: Lang,
     /// Message to turn into this job's status (the quality question).
     pub status_msg: Option<i64>,
+    /// Message id of the user's request.
+    pub user_msg_id: Option<i64>,
 }
 
 /// Why a link was not queued.
@@ -103,6 +107,7 @@ pub enum Cancel {
 struct Pending {
     user_id: i64,
     urls: Vec<String>,
+    user_msg_id: Option<i64>,
     created: Instant,
 }
 
@@ -113,6 +118,8 @@ pub struct App {
     pub plugins: Plugins,
     /// Global download slots (MAX_PARALLEL_DOWNLOADS).
     pub slots: Semaphore,
+    /// Upload slots to stream to Telegram concurrently without blocking new downloads.
+    pub upload_slots: Semaphore,
     /// Per-user turn (RATE_LIMIT_PER_USER), created on demand.
     user_slots: Mutex<HashMap<i64, Arc<Semaphore>>>,
     jobs: Mutex<HashMap<String, Entry>>,
@@ -351,12 +358,14 @@ fn store_keys(job: &Job, p: &Probed) -> Vec<String> {
 impl App {
     pub fn new(cfg: Config, bot: Bot, store: Store, plugins: Plugins) -> App {
         let slots = Semaphore::new(cfg.max_parallel);
+        let upload_slots = Semaphore::new(cfg.max_parallel.max(1));
         App {
             cfg,
             bot,
             store,
             plugins,
             slots,
+            upload_slots,
             user_slots: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
@@ -403,7 +412,7 @@ impl App {
 
     // -- quality question ---------------------------------------------------
 
-    pub fn stash_urls(&self, user_id: i64, urls: Vec<String>) -> String {
+    pub fn stash_urls(&self, user_id: i64, urls: Vec<String>, user_msg_id: Option<i64>) -> String {
         let mut pending = lock(&self.pending);
         pending.retain(|_, p| p.created.elapsed() < PENDING_TTL);
         if pending.len() >= PENDING_MAX {
@@ -412,13 +421,13 @@ impl App {
             }
         }
         let token = self.new_id(self.next_seq());
-        pending.insert(token.clone(), Pending { user_id, urls, created: Instant::now() });
+        pending.insert(token.clone(), Pending { user_id, urls, user_msg_id, created: Instant::now() });
         token
     }
 
     /// Take the links behind a quality question. `Err(true)` means the
     /// question belongs to someone else, `Err(false)` that it expired.
-    pub fn take_urls(&self, token: &str, user_id: i64) -> Result<Vec<String>, bool> {
+    pub fn take_urls(&self, token: &str, user_id: i64) -> Result<(Vec<String>, Option<i64>), bool> {
         let mut pending = lock(&self.pending);
         match pending.get(token) {
             None => Err(false),
@@ -428,7 +437,7 @@ impl App {
             }
             // Only the person who sent the links answers for them.
             Some(p) if p.user_id != user_id => Err(true),
-            Some(_) => Ok(pending.remove(token).map(|p| p.urls).unwrap_or_default()),
+            Some(_) => Ok(pending.remove(token).map(|p| (p.urls, p.user_msg_id)).unwrap_or_default()),
         }
     }
 
@@ -478,6 +487,7 @@ impl App {
             quality: req.quality,
             lang: req.lang,
             minimal,
+            user_msg_id: req.user_msg_id,
             video_key,
             key,
             stage,
@@ -722,13 +732,13 @@ impl App {
     }
 
     async fn pipeline(&self, job: &Job, dir: &Path) -> Result<(), JobError> {
-        let _slot = match self.slots.try_acquire() {
+        let mut dl_slot = Some(match self.slots.try_acquire() {
             Ok(p) => p,
             Err(_) => {
                 job.stage.send_replace(Stage::Waiting);
                 self.slots.acquire().await.map_err(|_| JobError::Dl(DlError::Internal("shutting down".into())))?
             }
-        };
+        });
 
         if let Some(free) = sys::free_space_mb(&self.cfg.temp_dir) {
             if free < self.cfg.min_free_mb {
@@ -743,6 +753,15 @@ impl App {
         // Two rounds at most: a cache hit whose file_id turns out dead is
         // retried as a real download.
         for round in 0..2 {
+            if dl_slot.is_none() {
+                job.stage.send_replace(Stage::Waiting);
+                dl_slot = Some(
+                    self.slots
+                        .acquire()
+                        .await
+                        .map_err(|_| JobError::Dl(DlError::Internal("shutting down".into())))?,
+                );
+            }
             let no_lookup = |_: &Probed| None;
             let lookup: ytdlp::Lookup<'_> = if round == 0 { &lookup } else { &no_lookup };
             let outcome = ytdlp::fetch(&self.cfg, &self.plugins, &job.url, kind, cap, dir, &job.stage, lookup)
@@ -750,6 +769,7 @@ impl App {
                 .map_err(JobError::Dl)?;
             match outcome {
                 Outcome::Cached(entry, probed) => {
+                    drop(dl_slot.take());
                     if self.send_cached(job, &entry).await {
                         log::info!("job {} served from cache after probe ({:?})", job.id, probed.video_key);
                         self.store.cache_put(&store_keys(job, &probed), entry);
@@ -758,6 +778,10 @@ impl App {
                 }
                 Outcome::Downloaded(fetched) => {
                     let ready = media::prepare(&self.cfg, fetched, &job.stage).await;
+                    // Release the download slot so the next item in the queue can start
+                    // downloading while this file is being streamed to Telegram.
+                    drop(dl_slot.take());
+
                     log::info!(
                         "job {} downloaded: {} ({}, {:?})",
                         job.id,
@@ -768,6 +792,11 @@ impl App {
                     if ready.size > self.cfg.upload_limit_bytes() {
                         return Err(JobError::TooBigToSend(ready.size));
                     }
+                    let _up_slot = self
+                        .upload_slots
+                        .acquire()
+                        .await
+                        .map_err(|_| JobError::Dl(DlError::Internal("shutting down".into())))?;
                     let msg =
                         self.upload(job, &ready).await.map_err(|err| JobError::Upload { size: ready.size, err })?;
                     if let Some(entry) = cache_entry(&msg, &ready) {
@@ -792,6 +821,11 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
             log::info!("job {} served from cache", job.id);
             if let Some(msg) = app.status_msg(&job.id) {
                 let _ = app.bot.delete_message(job.chat_id, msg).await;
+            }
+            if let Some(user_msg) = job.user_msg_id {
+                if let Err(e) = app.bot.delete_message(job.chat_id, user_msg).await {
+                    log::debug!("could not delete user message: {e}");
+                }
             }
             return;
         }
@@ -826,6 +860,11 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                     log::debug!("could not delete status message: {e}");
                 }
             }
+            if let Some(user_msg) = job.user_msg_id {
+                if let Err(e) = app.bot.delete_message(job.chat_id, user_msg).await {
+                    log::debug!("could not delete user message: {e}");
+                }
+            }
         }
         Err(err) => {
             match &err {
@@ -857,7 +896,7 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
             };
 
             let markup = if is_size_error {
-                let token = app.stash_urls(job.user_id, vec![job.url.clone()]);
+                let token = app.stash_urls(job.user_id, vec![job.url.clone()], job.user_msg_id);
                 lower_quality_keyboard(job.lang.t(), &token, job.quality)
             } else {
                 None
@@ -914,6 +953,7 @@ mod tests {
             quality,
             lang: Lang::En,
             minimal: false,
+            user_msg_id: None,
             key: request_key(&video_key, quality),
             video_key,
             stage: watch::channel(Stage::Queued).0,

@@ -55,7 +55,12 @@ fn main() {
     };
     logger::init(cfg.log_level, if fetch_mode { None } else { cfg.log_file.clone() });
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+    let workers = std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
     let code = if fetch_mode { rt.block_on(fetch_cli(cfg, &args[2..])) } else { rt.block_on(run(cfg)) };
     std::process::exit(code);
 }
@@ -152,7 +157,7 @@ async fn housekeeping(app: Arc<App>) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tick.tick().await;
-        app.store.flush();
+        app.store.flush_async().await;
     }
 }
 
