@@ -338,6 +338,17 @@ impl Bot {
         self.call::<IgnoredAny>("deleteMessage", &body, SHORT_TIMEOUT).await.map(|_| ())
     }
 
+    pub async fn send_chat_action(&self, chat_id: i64, action: &str, thread_id: Option<i64>) -> Result<(), TgError> {
+        let mut body = json!({
+            "chat_id": chat_id,
+            "action": action,
+        });
+        if let Some(t) = thread_id {
+            body["message_thread_id"] = json!(t);
+        }
+        self.call::<IgnoredAny>("sendChatAction", &body, Duration::from_secs(5)).await.map(|_| ())
+    }
+
     pub async fn delete_messages(&self, chat_id: i64, message_ids: &[i64]) -> Result<(), TgError> {
         if message_ids.is_empty() {
             return Ok(());

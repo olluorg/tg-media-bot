@@ -869,6 +869,22 @@ impl App {
         }
     }
 
+    async fn chat_action_loop(&self, job: &Job) {
+        let interval = Duration::from_secs(4);
+        loop {
+            let stage = job.stage.borrow().clone();
+            let action = match stage {
+                Stage::Uploading { .. } => match job.quality.kind() {
+                    Kind::Audio => "upload_voice",
+                    Kind::Video => "upload_video",
+                },
+                _ => "typing",
+            };
+            let _ = self.bot.send_chat_action(job.chat_id, action, job.thread_id).await;
+            tokio::time::sleep(interval).await;
+        }
+    }
+
     // -- the pipeline -------------------------------------------------------
 
     async fn send_with_retry(&self, media: &Media<'_>, sent: &Arc<AtomicU64>) -> Result<Message, TgError> {
@@ -1076,12 +1092,17 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
         }
     }
 
-    let result = match status_msg {
-        Some(msg) => tokio::select! {
-            r = app.pipeline(&job, &dir) => r,
-            _ = app.status_loop(&job, msg) => unreachable!("status loop never ends"),
-        },
-        None => app.pipeline(&job, &dir).await,
+    let status_fut = async {
+        if let Some(msg) = status_msg {
+            app.status_loop(&job, msg).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    let result = tokio::select! {
+        r = app.pipeline(&job, &dir) => r,
+        _ = status_fut => unreachable!("status loop never ends"),
+        _ = app.chat_action_loop(&job) => unreachable!("chat action loop never ends"),
     };
 
     match result {
