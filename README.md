@@ -53,14 +53,46 @@ Self-hosted Telegram-бот, который скачивает видео и а�
 
 ## Запуск через Docker (рекомендуется)
 
+### Быстрый запуск (готовый образ, без клонирования)
+
+Для запуска достаточно скачать `docker-compose.yml` и подготовить `.env`:
+
 ```bash
-cp .env.example .env
-nano .env        # BOT_TOKEN, ALLOWED_USERS, TELEGRAM_API_ID, TELEGRAM_API_HASH
-docker compose up -d --build
+mkdir -p tg-media-bot && cd tg-media-bot
+
+# 1. Скачиваем docker-compose.yml и шаблон .env
+curl -fSL https://raw.githubusercontent.com/olluorg/tg-media-bot/master/docker-compose.yml -o docker-compose.yml
+curl -fSL https://raw.githubusercontent.com/olluorg/tg-media-bot/master/.env.example -o .env
+
+# 2. Настраиваем переменные окружения
+nano .env
+
+# 3. Запускаем
+docker compose up -d
+
+# 4. Проверяем логи
 docker compose logs -f bot
 ```
 
-Compose поднимает бота и локальный Telegram Bot API сервер: с ним лимит файла 2 ГБ вместо 50 МБ. Для самого маленького VPS можно обойтись без него: удалите сервис `telegram-bot-api` и строки `API_SERVER_URL` / `LOCAL_API_SHARED_FILES` в `docker-compose.yml`. Тогда лимит файла 50 МБ.
+### Минимальные параметры в `.env`:
+* `BOT_TOKEN` — токен вашего бота от [@BotFather](https://t.me/BotFather).
+* `ALLOWED_USERS` — числовые ID пользователей в Telegram через запятую (узнать свой ID можно в [@userinfobot](https://t.me/userinfobot)).
+* `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` — с [my.telegram.org/apps](https://my.telegram.org/apps). Нужны для работы встроенного локального сервера Telegram Bot API (позволяет отправлять видео и аудио до **2 ГБ** вместо стандартных 50 МБ).
+
+> **Без локального API сервера (лимит 50 МБ, меньше памяти):** удалите сервис `telegram-bot-api` и строки `API_SERVER_URL` / `LOCAL_API_SHARED_FILES` в `docker-compose.yml`. Тогда `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` не потребуются.
+
+### Сборка и запуск из исходников
+
+Если вы хотите собрать образ локально на сервере:
+
+```bash
+git clone https://github.com/olluorg/tg-media-bot.git
+cd tg-media-bot
+cp .env.example .env
+nano .env
+docker compose up -d --build
+docker compose logs -f bot
+```
 
 yt-dlp в контейнере сам обновляется раз в сутки, и только когда нет активных загрузок.
 
