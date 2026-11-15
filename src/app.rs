@@ -303,12 +303,8 @@ pub fn render_status(job: &Job) -> String {
         }
         _ => {}
     }
-    let _ = write!(
-        text,
-        "\n<code>{}</code> · <code>{}</code>",
-        html_escape(util::truncate_chars(&job.url, 80)),
-        job.id
-    );
+    let _ =
+        write!(text, "\n<code>{}</code> · <code>{}</code>", html_escape(util::truncate_chars(&job.url, 80)), job.id);
     text
 }
 

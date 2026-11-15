@@ -413,9 +413,8 @@ pub async fn prepare(cfg: &Config, fetched: Fetched, stage: &watch::Sender<Stage
                         if let Some(h) = info.height {
                             if h > target_h {
                                 let new_h = target_h;
-                                let new_w = info
-                                    .width
-                                    .map(|w| (w as f64 * new_h as f64 / h as f64).round() as u32 / 2 * 2);
+                                let new_w =
+                                    info.width.map(|w| (w as f64 * new_h as f64 / h as f64).round() as u32 / 2 * 2);
                                 info.height = Some(new_h);
                                 info.width = new_w;
                             }
