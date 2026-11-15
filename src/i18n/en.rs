@@ -18,6 +18,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     lang_set: "✅ Language: {lang}",
     nudge: "👋 Send me a link to download.\n/help — commands",
     not_authorized: "⛔ You are not allowed to use this bot.",
+    cleared: "🧹 Chat cleared.",
 
     quality_current: "🎚 Quality for new links: <b>{q}</b>\nPick what to use from now on:",
     quality_set: "✅ New links will be downloaded as: <b>{q}</b>. Change it with /quality.",
@@ -102,6 +103,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     c_quality: "Default quality",
     c_status: "Your queue",
     c_cancel: "Cancel a download (or all)",
+    c_clear: "Clear message history: [count]",
     c_minimal: "Minimal UI: on|off",
     c_topic: "Stay in one topic: lock|unlock|status",
     c_lang: "Language",

@@ -204,6 +204,7 @@ pub struct Media<'a> {
     pub thumb: Option<&'a Path>,
 }
 
+#[derive(Clone)]
 pub struct Bot {
     http: reqwest::Client,
     base: String,
@@ -327,6 +328,23 @@ impl Bot {
     pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), TgError> {
         let body = json!({ "chat_id": chat_id, "message_id": message_id });
         self.call::<IgnoredAny>("deleteMessage", &body, SHORT_TIMEOUT).await.map(|_| ())
+    }
+
+    pub async fn delete_messages(&self, chat_id: i64, message_ids: &[i64]) -> Result<(), TgError> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        let body = json!({ "chat_id": chat_id, "message_ids": message_ids });
+        match self.call::<IgnoredAny>("deleteMessages", &body, SHORT_TIMEOUT).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                log::debug!("deleteMessages failed ({e}), falling back to individual deleteMessage");
+                for &id in message_ids {
+                    let _ = self.delete_message(chat_id, id).await;
+                }
+                Ok(())
+            }
+        }
     }
 
     pub async fn answer_callback(&self, id: &str, text: Option<&str>, alert: bool) {

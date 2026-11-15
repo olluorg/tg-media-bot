@@ -163,6 +163,36 @@ pub fn cancel_markup(t: &Strings, id: &str) -> Value {
     json!({ "inline_keyboard": [[{ "text": t.btn_cancel, "callback_data": format!("c:{id}") }]] })
 }
 
+pub fn lower_quality_keyboard(t: &Strings, token: &str, current: Quality) -> Option<Value> {
+    let lower_heights: Vec<u32> = match current {
+        Quality::Max => vec![720, 480, 360],
+        Quality::Height(h) => Quality::HEIGHTS.into_iter().filter(|&cand| cand < h).collect(),
+        Quality::Audio => vec![],
+    };
+
+    let mut buttons: Vec<Value> = lower_heights
+        .into_iter()
+        .map(|h| {
+            let q = Quality::Height(h);
+            json!({ "text": q.label(t), "callback_data": format!("q:{token}:{}", q.code()) })
+        })
+        .collect();
+
+    if current != Quality::Audio {
+        buttons.push(json!({
+            "text": Quality::Audio.label(t),
+            "callback_data": format!("q:{token}:audio")
+        }));
+    }
+
+    if buttons.is_empty() {
+        return None;
+    }
+
+    let rows: Vec<Value> = buttons.chunks(2).map(|c| Value::Array(c.to_vec())).collect();
+    Some(json!({ "inline_keyboard": rows }))
+}
+
 fn build_caption(title: &str, url: &str) -> String {
     let url_html = format!("<code>{}</code>", html_escape(url));
     let title = title.trim();
@@ -804,8 +834,37 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                 JobError::Dl(e) => log::info!("job {} failed: {e:?}", job.id),
                 JobError::NoSpace | JobError::TooBigToSend(_) => log::warn!("job {} refused", job.id),
             }
+            let is_size_error = matches!(
+                &err,
+                JobError::TooBigToSend(_) | JobError::Dl(DlError::Rejected(Reject::TooLarge { .. }))
+            ) || match &err {
+                JobError::Dl(DlError::Failed(raw)) => {
+                    let low = raw.to_lowercase();
+                    low.contains("too large")
+                        || low.contains("exceeds")
+                        || low.contains("upload limit")
+                        || low.contains("max-filesize")
+                        || low.contains("file is larger")
+                }
+                JobError::Upload { err, .. } => {
+                    let desc = match err {
+                        crate::telegram::TgError::Api { desc, .. } => desc.to_lowercase(),
+                        crate::telegram::TgError::Net(s) => s.to_lowercase(),
+                    };
+                    desc.contains("too large") || desc.contains("too big") || desc.contains("entity too large")
+                }
+                _ => false,
+            };
+
+            let markup = if is_size_error {
+                let token = app.stash_urls(job.user_id, vec![job.url.clone()]);
+                lower_quality_keyboard(job.lang.t(), &token, job.quality)
+            } else {
+                None
+            };
+
             let text = error_text(job.lang.t(), &app.cfg, &err, &job.url);
-            app.deliver(&job, status_msg, &text, None).await;
+            app.deliver(&job, status_msg, &text, markup).await;
         }
     }
 }

@@ -23,6 +23,7 @@ pub fn command_list(t: &Strings) -> Vec<(&'static str, &'static str)> {
         ("quality", t.c_quality),
         ("status", t.c_status),
         ("cancel", t.c_cancel),
+        ("clear", t.c_clear),
         ("lang", t.c_lang),
         ("minimal", t.c_minimal),
         ("topic", t.c_topic),
@@ -375,6 +376,39 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 }
             }
         }
+        "clear" | "clean" => {
+            if msg.chat.is_group() && !app.cfg.allowed_users.is_empty() && !app.cfg.allowed_users.contains(&ctx.user) {
+                app.say(chat, thread, t.not_authorized, None).await;
+                return;
+            }
+
+            let count: usize = first.as_deref().and_then(|s| s.parse().ok()).unwrap_or(100).min(500).max(1);
+            let mut remaining = count;
+            let mut current_id = msg.message_id;
+
+            while remaining > 0 && current_id > 0 {
+                let batch_size = remaining.min(100);
+                let start_id = current_id.saturating_sub(batch_size as i64 - 1).max(1);
+                let ids: Vec<i64> = (start_id..=current_id).rev().collect();
+                if ids.is_empty() {
+                    break;
+                }
+                let _ = app.bot.delete_messages(chat, &ids).await;
+                if start_id <= 1 {
+                    break;
+                }
+                current_id = start_id - 1;
+                remaining -= ids.len();
+            }
+
+            if let Ok(confirm_msg) = app.bot.send_message(chat, thread, t.cleared, None).await {
+                let bot = app.bot.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let _ = bot.delete_message(chat, confirm_msg.message_id).await;
+                });
+            }
+        }
         "minimal" => match first.as_deref() {
             Some("on") => {
                 app.store.set_minimal(chat, true);
@@ -535,6 +569,10 @@ mod tests {
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
-        assert_eq!(command_list(Lang::Ru.t()).len(), 8);
+        assert_eq!(command_list(Lang::Ru.t()).len(), 9);
+        let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080)).unwrap();
+        let lq_str = lq.to_string();
+        assert!(lq_str.contains("q:tok:720") && lq_str.contains("q:tok:480") && lq_str.contains("q:tok:360") && lq_str.contains("q:tok:audio"));
+        assert!(crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Audio).is_none());
     }
 }

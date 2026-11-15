@@ -18,6 +18,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud і ще
     lang_set: "✅ Мова: {lang}",
     nudge: "👋 Надішли посилання для завантаження.\n/help — команди",
     not_authorized: "⛔ У тебе немає доступу до цього бота.",
+    cleared: "🧹 Історію повідомлень очищено.",
 
     quality_current: "🎚 Якість для нових посилань: <b>{q}</b>\nВибери, як завантажувати далі:",
     quality_set: "✅ Нові посилання завантажуватимуться так: <b>{q}</b>. Змінити — /quality.",
@@ -102,6 +103,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud і ще
     c_quality: "Якість за замовчуванням",
     c_status: "Твоя черга",
     c_cancel: "Скасувати завантаження (або всі)",
+    c_clear: "Очистити історію повідомлень: [кількість]",
     c_minimal: "Мінімальний інтерфейс: on|off",
     c_topic: "Працювати в одній темі: lock|unlock|status",
     c_lang: "Мова",

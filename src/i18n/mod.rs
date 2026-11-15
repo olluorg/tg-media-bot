@@ -26,7 +26,7 @@ macro_rules! strings {
 
 strings! {
     // general
-    welcome, help, help_limits, help_limit_duration, lang_set, nudge, not_authorized,
+    welcome, help, help_limits, help_limit_duration, lang_set, nudge, not_authorized, cleared,
     // /quality
     quality_current, quality_set, word_ask,
     // /cancel, /status
@@ -47,7 +47,7 @@ strings! {
     e_no_media, e_404, e_403, e_rate, e_network, e_geo, e_drm, e_live, e_too_long, e_too_large,
     e_no_space, e_timeout, e_upload, e_upload_big, e_internal,
     // command menu
-    c_start, c_help, c_quality, c_status, c_cancel, c_minimal, c_topic, c_lang,
+    c_start, c_help, c_quality, c_status, c_cancel, c_clear, c_minimal, c_topic, c_lang,
 }
 
 /// Shown above the language buttons; deliberately multilingual.

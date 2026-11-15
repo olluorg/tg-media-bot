@@ -18,6 +18,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud y más 
     lang_set: "✅ Idioma: {lang}",
     nudge: "👋 Envíame un enlace para descargar.\n/help — comandos",
     not_authorized: "⛔ No tienes permiso para usar este bot.",
+    cleared: "🧹 Historial de mensajes borrado.",
 
     quality_current: "🎚 Calidad para enlaces nuevos: <b>{q}</b>\nElige qué usar a partir de ahora:",
     quality_set: "✅ Los enlaces nuevos se descargarán así: <b>{q}</b>. Cámbialo con /quality.",
@@ -102,6 +103,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud y más 
     c_quality: "Calidad por defecto",
     c_status: "Tu cola",
     c_cancel: "Cancelar una descarga (o todas)",
+    c_clear: "Borrar historial de mensajes: [cantidad]",
     c_minimal: "Interfaz mínima: on|off",
     c_topic: "Limitar a un tema: lock|unlock|status",
     c_lang: "Idioma",
