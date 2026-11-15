@@ -99,7 +99,7 @@ docker compose logs -f bot
 <details>
 <summary><b>Запуск без Docker (systemd)</b></summary>
 
-Требуются установленные `yt-dlp`, `ffmpeg`, `ffprobe` в `PATH`, а также `deno` (для YouTube):
+Требуются установленные `yt-dlp`, `ffmpeg`, `ffprobe` в `PATH`, а также `quickjs` (или `deno`) для YouTube:
 
 ```bash
 cargo build --release
