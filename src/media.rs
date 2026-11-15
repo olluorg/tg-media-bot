@@ -357,6 +357,38 @@ pub struct Ready {
 pub async fn prepare(cfg: &Config, fetched: Fetched, stage: &watch::Sender<Stage>) -> Ready {
     let Fetched { mut path, thumb, title, performer, duration, probed } = fetched;
     let kind = probed.kind;
+
+    // Fast path: for audio downloads where duration is already known, skip ffprobe entirely.
+    if kind == Kind::Audio && duration > 0.0 {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if matches!(ext.as_str(), "mp3" | "m4a" | "aac" | "ogg" | "flac") {
+            let thumb = match thumb {
+                Some(src) => make_thumb(cfg, &src).await,
+                _ => None,
+            };
+            let ext_str = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "bin".into());
+            let file_name = format!("{}.{ext_str}", util::sanitize_filename(&title, 120));
+            let named = path.with_file_name(&file_name);
+            if named != path && std::fs::rename(&path, &named).is_ok() {
+                path = named;
+            }
+            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            return Ready {
+                path,
+                file_name,
+                kind: MediaKind::Audio,
+                title,
+                performer,
+                duration: duration.round().max(0.0) as u32,
+                width: None,
+                height: None,
+                thumb,
+                size,
+                probed,
+            };
+        }
+    }
+
     let mut info = ffprobe(cfg, &path).await.unwrap_or_default();
     if info.duration <= 0.0 {
         info.duration = duration;
@@ -376,12 +408,23 @@ pub async fn prepare(cfg: &Config, fetched: Fetched, stage: &watch::Sender<Stage
                 Some(converted) => {
                     path = converted;
                     if action == Action::Transcode {
-                        // Dimensions changed; re-read them.
-                        let duration = info.duration;
-                        info = ffprobe(cfg, &path).await.unwrap_or(info);
-                        if info.duration <= 0.0 {
-                            info.duration = duration;
+                        // Dimensions changed: calculate scaled dimensions directly instead of running ffprobe again.
+                        let target_h = cfg.transcode_height;
+                        if let Some(h) = info.height {
+                            if h > target_h {
+                                let new_h = target_h;
+                                let new_w = info
+                                    .width
+                                    .map(|w| (w as f64 * new_h as f64 / h as f64).round() as u32 / 2 * 2);
+                                info.height = Some(new_h);
+                                info.width = new_w;
+                            }
+                        } else {
+                            info.height = Some(target_h);
                         }
+                        info.vcodec = Some("h264".into());
+                        info.acodec = Some("aac".into());
+                        info.is_mp4 = true;
                     }
                     MediaKind::Video
                 }

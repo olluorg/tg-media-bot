@@ -10,7 +10,7 @@ description = "Lightweight self-hosted Telegram media downloader bot (yt-dlp + f
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "fs", "io-util", "time", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "multipart", "stream", "socks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = { version = "0.4", features = ["std"] }

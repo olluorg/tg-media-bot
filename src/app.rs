@@ -774,13 +774,50 @@ impl App {
         let interval = Duration::from_secs(self.cfg.progress_interval);
         let markup = cancel_markup(job.lang.t(), &job.id);
         let mut rx = job.stage.subscribe();
-        let mut last = String::new();
+        let mut last_text = String::new();
+        let mut last_pct: Option<f32> = None;
+        let mut last_stage_name = "";
+        let mut last_edit = Instant::now().checked_sub(interval).unwrap_or_else(Instant::now);
         loop {
-            let text = render_status(job);
-            if text != last {
-                self.edit_status(job.chat_id, msg_id, &text, Some(markup.clone())).await;
-                last = text;
+            let stage = job.stage.borrow().clone();
+            let current_stage_name = match &stage {
+                Stage::Queued => "queued",
+                Stage::Waiting => "waiting",
+                Stage::Probing => "probing",
+                Stage::Downloading { .. } => "downloading",
+                Stage::Processing => "processing",
+                Stage::Transcoding { .. } => "transcoding",
+                Stage::Uploading { .. } => "uploading",
+            };
+            let current_pct = match &stage {
+                Stage::Downloading { pct, .. } => *pct,
+                Stage::Transcoding { pct, .. } => *pct,
+                Stage::Uploading { total } if *total > 0 => {
+                    let sent = job.sent.load(Ordering::Relaxed).min(*total);
+                    Some(sent as f32 * 100.0 / *total as f32)
+                }
+                _ => None,
+            };
+
+            let stage_changed = current_stage_name != last_stage_name;
+            let significant_progress = match (current_pct, last_pct) {
+                (Some(curr), Some(prev)) => (curr - prev).abs() >= 5.0,
+                (Some(_), None) | (None, Some(_)) => true,
+                _ => false,
+            };
+            let time_elapsed = last_edit.elapsed() >= interval;
+
+            if stage_changed || (time_elapsed && significant_progress) {
+                let text = render_status(job);
+                if text != last_text {
+                    self.edit_status(job.chat_id, msg_id, &text, Some(markup.clone())).await;
+                    last_text = text;
+                    last_pct = current_pct;
+                    last_stage_name = current_stage_name;
+                    last_edit = Instant::now();
+                }
             }
+
             tokio::time::sleep(interval).await;
             // Uploads report through a counter, not the channel: poll them.
             let uploading = matches!(*rx.borrow_and_update(), Stage::Uploading { .. });
