@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 
+ARG DENO_VERSION=2.5.6
 ARG FFMPEG_VERSION=7.1.1
 
+FROM denoland/deno:bin-${DENO_VERSION} AS deno
 # Static ffmpeg/ffprobe: ~200 MB lighter than Debian's package and newer.
 FROM mwader/static-ffmpeg:${FFMPEG_VERSION} AS ffmpeg
 
@@ -44,6 +46,7 @@ RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
     && mkdir -p /data/tmp /cookies /plugins \
     && chown -R app:app /data /cookies /plugins
 
+COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
 COPY --from=build /src/target/release/tg-media-bot /usr/local/bin/tg-media-bot
 
