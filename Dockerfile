@@ -29,15 +29,6 @@ RUN touch src/main.rs && cargo build --release --locked
 # ---- runtime ----------------------------------------------------------------
 FROM python:3.12-slim-bookworm
 
-ARG TARGETARCH
-ARG QUICKJS_VERSION=v0.8.0
-
-# QuickJS-ng: ultra-lightweight JS engine for YouTube player challenges (~5 MB RAM vs ~300 MB with Deno).
-RUN ARCH=$(case "${TARGETARCH:-amd64}" in "arm64") echo "aarch64" ;; *) echo "x86_64" ;; esac) \
-    && python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/quickjs-ng/quickjs/releases/download/${QUICKJS_VERSION}/qjs-linux-' + '${ARCH}', '/usr/local/bin/qjs')" \
-    && chmod 755 /usr/local/bin/qjs \
-    && ln -s /usr/local/bin/qjs /usr/local/bin/quickjs
-
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
     && python -m venv /opt/yt-dlp \
     && /opt/yt-dlp/bin/pip install --no-cache-dir "yt-dlp[default]" \
