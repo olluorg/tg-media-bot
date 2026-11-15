@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 use crate::app::{cancel_markup, render_status, stage_label, App, Cancel, Refusal, Request};
 use crate::i18n::{fill, Lang, Strings, LANG_PROMPT};
+use crate::sys;
 use crate::telegram::{CallbackQuery, Message, Update, User};
 use crate::types::{Quality, Stage};
 use crate::util;
@@ -437,7 +438,7 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 return;
             }
 
-            let count: usize = first.as_deref().and_then(|s| s.parse().ok()).unwrap_or(100).min(500).max(1);
+            let count: usize = first.as_deref().and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
             let mut remaining = count;
             let mut current_id = msg.message_id;
 
@@ -504,6 +505,86 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 }
                 _ => app.say(chat, thread, t.topic_usage, None).await,
             }
+        }
+        "stats" | "admin" => {
+            if !app.is_admin(ctx.user) {
+                app.say(chat, thread, t.not_authorized, None).await;
+                return;
+            }
+            let uptime = util::fmt_duration(app.uptime().as_secs());
+            let active = app.active_jobs();
+            let cache_entries = app.store.cache_count();
+            let mem = sys::process_memory_mb().map(|m| format!("{m} MB")).unwrap_or_else(|| "n/a".to_string());
+            let disk =
+                sys::free_space_mb(&app.cfg.temp_dir).map(|d| format!("{d} MB")).unwrap_or_else(|| "n/a".to_string());
+
+            let text = format!(
+                "📊 <b>System & Bot Status</b>\n\n\
+                 • <b>Version:</b> <code>tg-media-bot {}</code>\n\
+                 • <b>Uptime:</b> {}\n\
+                 • <b>Active jobs:</b> {}\n\
+                 • <b>Cache entries:</b> {}\n\
+                 • <b>RAM (RSS):</b> {}\n\
+                 • <b>Disk free:</b> {}\n\n\
+                 ⚙️ <b>Limits & Config:</b>\n\
+                 • Parallel downloads: {} (per user: {})\n\
+                 • Max file size: {}\n\
+                 • Max duration: {}\n\
+                 • Timeout: {}\n\
+                 • Allowed users: {}\n\
+                 • Admins: {}",
+                env!("CARGO_PKG_VERSION"),
+                uptime,
+                active,
+                cache_entries,
+                mem,
+                disk,
+                app.cfg.max_parallel,
+                app.cfg.per_user,
+                util::fmt_size(app.cfg.max_file_bytes),
+                if app.cfg.max_duration > 0 { util::fmt_duration(app.cfg.max_duration) } else { "unlimited".into() },
+                util::fmt_duration(app.cfg.download_timeout),
+                if app.cfg.allowed_users.is_empty() {
+                    "public".into()
+                } else {
+                    app.cfg.allowed_users.len().to_string()
+                },
+                if app.cfg.admin_users.is_empty() {
+                    "allowed users".into()
+                } else {
+                    app.cfg.admin_users.len().to_string()
+                },
+            );
+            app.say(chat, thread, &text, None).await;
+        }
+        "clean_cache" | "cleancache" => {
+            if !app.is_admin(ctx.user) {
+                app.say(chat, thread, t.not_authorized, None).await;
+                return;
+            }
+            let count = app.store.clear_cache();
+            app.say(chat, thread, &format!("🧹 Cache cleared: {count} entries removed."), None).await;
+        }
+        "broadcast" => {
+            if !app.is_admin(ctx.user) {
+                app.say(chat, thread, t.not_authorized, None).await;
+                return;
+            }
+            if args.trim().is_empty() {
+                app.say(chat, thread, "Usage: /broadcast &lt;message&gt;", None).await;
+                return;
+            }
+            let chats = app.store.known_chats();
+            let mut sent = 0usize;
+            let mut failed = 0usize;
+            for target_chat in chats {
+                match app.bot.send_message(target_chat, None, args, None, None).await {
+                    Ok(_) => sent += 1,
+                    Err(_) => failed += 1,
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            app.say(chat, thread, &format!("📢 Broadcast completed: {sent} sent, {failed} failed."), None).await;
         }
         _ => {
             if !msg.chat.is_group() {

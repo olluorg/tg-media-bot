@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::i18n::{fill, Lang, Strings};
 use crate::media::{self, Ready};
 use crate::plugins::Plugins;
-use crate::state::{CacheEntry, Store};
+use crate::state::{CacheEntry, SavedJob, Store};
 use crate::sys;
 use crate::telegram::{Bot, Media, MediaKind, Message, Source, TgError, User};
 use crate::types::{Kind, Quality, Stage};
@@ -142,6 +142,7 @@ pub struct App {
     /// chat -> moment until which progress edits are skipped (flood control).
     edit_block: Mutex<HashMap<i64, Instant>>,
     seq: AtomicU64,
+    pub started_at: Instant,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -166,6 +167,7 @@ impl Drop for JobGuard {
                 lock(&self.app.user_slots).remove(&self.user_id);
             }
         }
+        self.app.store.remove_active_job(&self.id);
         if self.dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&self.dir) {
                 log::warn!("could not remove {}: {e}", self.dir.display());
@@ -391,6 +393,19 @@ impl App {
             pending: Mutex::new(HashMap::new()),
             edit_block: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            started_at: Instant::now(),
+        }
+    }
+
+    pub fn uptime(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    pub fn is_admin(&self, user_id: i64) -> bool {
+        if !self.cfg.admin_users.is_empty() {
+            self.cfg.admin_users.contains(&user_id)
+        } else {
+            !self.cfg.allowed_users.is_empty() && self.cfg.allowed_users.contains(&user_id)
         }
     }
 
@@ -509,7 +524,7 @@ impl App {
             user_id: req.user_id,
             chat_id: req.chat_id,
             thread_id: req.thread_id,
-            url: req.url,
+            url: req.url.clone(),
             quality: req.quality,
             lang: req.lang,
             minimal,
@@ -531,6 +546,18 @@ impl App {
         // Registered before the task exists, so even an instant cache hit
         // finds (and removes) its own entry.
         let status_msg = if minimal { None } else { req.status_msg };
+        self.store.save_active_job(SavedJob {
+            id: id.clone(),
+            user_id: req.user_id,
+            chat_id: req.chat_id,
+            thread_id: req.thread_id,
+            url: req.url.clone(),
+            quality: req.quality.code(),
+            lang: req.lang,
+            status_msg,
+            user_msg_id: req.user_msg_id,
+            created_at: crate::state::now_secs(),
+        });
         jobs.insert(id.clone(), Entry { job: job.clone(), abort: None, status_msg });
         let handle = tokio::spawn(run_job(self.clone(), job.clone()));
         if let Some(entry) = jobs.get_mut(&id) {
@@ -547,10 +574,86 @@ impl App {
         if let Some(e) = lock(&self.jobs).get_mut(id) {
             e.status_msg = Some(msg);
         }
+        self.store.update_active_job_status_msg(id, msg);
     }
 
     fn may_cancel(&self, job: &Job, user_id: i64) -> bool {
-        job.user_id == user_id || self.cfg.allowed_users.contains(&user_id)
+        job.user_id == user_id || self.is_admin(user_id) || self.cfg.allowed_users.contains(&user_id)
+    }
+
+    /// Attempt to restore interrupted jobs on startup.
+    /// Returns (resumed_count, dropped_count).
+    pub async fn recover_jobs(self: &Arc<Self>, jobs: Vec<SavedJob>) -> (usize, usize) {
+        if jobs.is_empty() {
+            return (0, 0);
+        }
+        log::info!("recovering {} interrupted job(s)...", jobs.len());
+        let now = crate::state::now_secs();
+        let max_age = 3600u64; // 1 hour TTL for interrupted jobs
+
+        // 1. Check disk space protection first
+        let free_mb = sys::free_space_mb(&self.cfg.temp_dir).unwrap_or(u64::MAX);
+        if free_mb < self.cfg.min_free_mb {
+            log::warn!("low disk space ({} MB < {} MB): cannot recover jobs", free_mb, self.cfg.min_free_mb);
+            for saved in &jobs {
+                if let Some(msg_id) = saved.status_msg {
+                    let t = saved.lang.t();
+                    let _ = self.bot.edit_message(saved.chat_id, msg_id, t.e_no_space, None).await;
+                }
+            }
+            return (0, jobs.len());
+        }
+
+        let mut resumed = 0;
+        let mut dropped = 0;
+
+        for saved in jobs {
+            let t = saved.lang.t();
+            let is_expired = now.saturating_sub(saved.created_at) > max_age;
+            let has_room = self.user_room(saved.user_id) > 0;
+            let quality = Quality::parse(&saved.quality).unwrap_or(Quality::Max);
+
+            if is_expired || !has_room {
+                log::info!("dropping interrupted job {}: expired={is_expired}, has_room={has_room}", saved.id);
+                dropped += 1;
+                if let Some(msg_id) = saved.status_msg {
+                    let _ = self.bot.edit_message(saved.chat_id, msg_id, t.restarted_notice, None).await;
+                }
+                continue;
+            }
+
+            // Update status message before enqueuing to let user know bot recovered
+            if let Some(msg_id) = saved.status_msg {
+                let _ = self.bot.edit_message(saved.chat_id, msg_id, t.st_resuming, None).await;
+            }
+
+            let req = Request {
+                chat_id: saved.chat_id,
+                thread_id: saved.thread_id,
+                user_id: saved.user_id,
+                url: saved.url,
+                quality,
+                lang: saved.lang,
+                status_msg: saved.status_msg,
+                user_msg_id: saved.user_msg_id,
+            };
+
+            match self.enqueue(req) {
+                Ok(_) => {
+                    resumed += 1;
+                }
+                Err(r) => {
+                    log::warn!("failed to re-enqueue job {}: {r:?}", saved.id);
+                    dropped += 1;
+                    if let Some(msg_id) = saved.status_msg {
+                        let _ = self.bot.edit_message(saved.chat_id, msg_id, t.restarted_notice, None).await;
+                    }
+                }
+            }
+        }
+
+        log::info!("recovery complete: resumed={resumed}, dropped={dropped}");
+        (resumed, dropped)
     }
 
     /// Cancel a job. Its owner may cancel it, and so may allowlisted users.

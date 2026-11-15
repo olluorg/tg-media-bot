@@ -24,6 +24,22 @@ pub fn free_space_mb(_path: &Path) -> Option<u64> {
     None
 }
 
+/// Resident set size (RSS in MiB) of the current process, if available.
+pub fn process_memory_mb() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
+            if let Some(pages) = s.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()) {
+                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+                if page_size > 0 {
+                    return Some((pages.saturating_mul(page_size as u64)) / 1_048_576);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// True if `path` lives on a RAM-backed filesystem (Linux only). Downloading
 /// there silently eats memory instead of disk.
 pub fn is_tmpfs(path: &Path) -> bool {

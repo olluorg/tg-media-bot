@@ -74,7 +74,9 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     st_transcoding: "🎞 Converting",
     st_uploading: "📤 Uploading",
     st_title_pending: "fetching title…",
+    st_resuming: "🔄 Resuming download after bot restart…",
 
+    restarted_notice: "⚠️ Bot was restarted. Please send the link again.",
     err_title: "❌ <b>Download failed</b>",
     e_age: "🔞 Age-restricted. The bot owner has to set COOKIES_FILE from a logged-in account.",
     e_bot: "🤖 The site wants a sign-in to prove you're not a bot. The bot owner has to set COOKIES_FILE.",

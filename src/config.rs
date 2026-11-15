@@ -32,6 +32,7 @@ pub struct Config {
     /// file over HTTP. Needs the temp dir shared with the server at the same path.
     pub local_api_files: bool,
     pub allowed_users: HashSet<i64>,
+    pub admin_users: HashSet<i64>,
     pub default_lang: Lang,
 
     pub data_dir: PathBuf,
@@ -159,6 +160,18 @@ impl Config {
             }
         }
 
+        let mut admin_users = HashSet::new();
+        for part in env.get("ADMIN_USERS").unwrap_or_default().split(',') {
+            let part = part.trim();
+            if !part.is_empty() {
+                let id = part.parse::<i64>().map_err(|_| format!("ADMIN_USERS: bad id '{part}'"))?;
+                admin_users.insert(id);
+                if !allowed_users.is_empty() {
+                    allowed_users.insert(id);
+                }
+            }
+        }
+
         let default_lang = match env.get("DEFAULT_LANG") {
             None => Lang::En,
             Some(code) => Lang::from_code(&code).ok_or_else(|| format!("DEFAULT_LANG: unknown language '{code}'"))?,
@@ -198,6 +211,7 @@ impl Config {
             local_api,
             local_api_files: local_api && env.flag("LOCAL_API_SHARED_FILES", false),
             allowed_users,
+            admin_users,
             default_lang,
             data_dir,
             temp_dir,
@@ -306,5 +320,14 @@ mod tests {
         assert!(Config::from_env(&Env::from_pairs(&[])).is_err());
         let env = Env::from_pairs(&[("BOT_TOKEN", "1:abc"), ("ALLOWED_USERS", "1,x")]);
         assert!(Config::from_env(&env).is_err());
+    }
+
+    #[test]
+    fn admin_users_parsing() {
+        let env = Env::from_pairs(&[("BOT_TOKEN", "1:abc"), ("ALLOWED_USERS", "10,20"), ("ADMIN_USERS", "20, 30")]);
+        let cfg = Config::from_env(&env).unwrap();
+        assert_eq!(cfg.admin_users.len(), 2);
+        assert!(cfg.admin_users.contains(&20) && cfg.admin_users.contains(&30));
+        assert!(cfg.allowed_users.contains(&30));
     }
 }

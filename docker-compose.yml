@@ -61,6 +61,12 @@ services:
       - ./cookies:/cookies
       - ./plugins:/plugins:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/tg-media-bot", "health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     # The bot itself needs ~10 MB; the rest is headroom for one yt-dlp +
     # ffmpeg run. If you raise MAX_PARALLEL_DOWNLOADS, raise this too.
     mem_limit: 768m

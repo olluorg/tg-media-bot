@@ -1,9 +1,9 @@
 [package]
 name = "tg-media-bot"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
-description = "Lightweight self-hosted Telegram media downloader bot (yt-dlp + ffmpeg), Rust rewrite"
+description = "Lightweight self-hosted Telegram media downloader bot (yt-dlp + ffmpeg)"
 
 [dependencies]
 # Runtime: async I/O glue with multi-thread worker pool for TLS/streaming/JSON.

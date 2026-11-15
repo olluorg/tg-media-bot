@@ -42,8 +42,9 @@ strings! {
     invalid_url, private_url, user_queue_full, queue_partial, queue_full, duplicate,
     // stages
     st_queued, st_waiting, st_probing, st_downloading, st_processing, st_transcoding, st_uploading,
-    st_title_pending,
-    // errors
+    st_title_pending, st_resuming,
+    // notices & errors
+    restarted_notice,
     err_title, e_age, e_bot, e_private, e_members, e_login, e_format, e_unavailable, e_unsupported,
     e_no_media, e_404, e_403, e_rate, e_network, e_geo, e_drm, e_live, e_too_long, e_too_large,
     e_no_space, e_timeout, e_upload, e_upload_big, e_internal,

@@ -51,6 +51,24 @@ pub struct CacheEntry {
     pub ts: u64,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct SavedJob {
+    pub id: String,
+    pub user_id: i64,
+    pub chat_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<i64>,
+    pub url: String,
+    pub quality: String,
+    pub lang: Lang,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_msg: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_msg_id: Option<i64>,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct Data {
     #[serde(default)]
@@ -63,6 +81,8 @@ struct Data {
     audio_users: Vec<i64>,
     #[serde(default)]
     cache: HashMap<String, CacheEntry>,
+    #[serde(default)]
+    jobs: HashMap<String, SavedJob>,
 }
 
 pub struct Store {
@@ -206,6 +226,66 @@ impl Store {
         if removed {
             self.dirty.store(true, Ordering::Relaxed);
         }
+    }
+
+    pub fn cache_count(&self) -> usize {
+        self.with(|d| d.cache.len())
+    }
+
+    pub fn clear_cache(&self) -> usize {
+        let count = self.with(|d| {
+            let len = d.cache.len();
+            d.cache.clear();
+            len
+        });
+        if count > 0 {
+            self.dirty.store(true, Ordering::Relaxed);
+            self.flush();
+        }
+        count
+    }
+
+    pub fn save_active_job(&self, job: SavedJob) {
+        self.with(|d| {
+            d.jobs.insert(job.id.clone(), job);
+        });
+        self.dirty.store(true, Ordering::Relaxed);
+        self.flush();
+    }
+
+    pub fn update_active_job_status_msg(&self, id: &str, status_msg: i64) {
+        self.with(|d| {
+            if let Some(j) = d.jobs.get_mut(id) {
+                j.status_msg = Some(status_msg);
+            }
+        });
+        self.dirty.store(true, Ordering::Relaxed);
+        self.flush();
+    }
+
+    pub fn remove_active_job(&self, id: &str) {
+        let removed = self.with(|d| d.jobs.remove(id).is_some());
+        if removed {
+            self.dirty.store(true, Ordering::Relaxed);
+            self.flush();
+        }
+    }
+
+    pub fn take_active_jobs(&self) -> Vec<SavedJob> {
+        let jobs = self.with(|d| {
+            let list: Vec<SavedJob> = d.jobs.values().cloned().collect();
+            d.jobs.clear();
+            list
+        });
+        if !jobs.is_empty() {
+            self.dirty.store(true, Ordering::Relaxed);
+            self.flush();
+        }
+        jobs
+    }
+
+    pub fn known_chats(&self) -> Vec<i64> {
+        self.with(|d| d.chats.keys().copied().collect())
     }
 
     /// Write to disk if anything changed since the last flush.
@@ -395,6 +475,37 @@ mod tests {
             store.cache_put(&[format!("url:https://a.com/{i}|v@max")], entry(&i.to_string()));
         }
         assert!(store.with(|d| d.cache.len()) <= MAX_CACHE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_jobs_lifecycle() {
+        let dir = temp_dir("saved-jobs");
+        let store = Store::load(&dir);
+        let job = SavedJob {
+            id: "job123".into(),
+            user_id: 100,
+            chat_id: 200,
+            thread_id: None,
+            url: "https://example.com/video".into(),
+            quality: "720".into(),
+            lang: Lang::En,
+            status_msg: Some(300),
+            user_msg_id: Some(400),
+            created_at: 1000,
+        };
+        store.save_active_job(job);
+        store.update_active_job_status_msg("job123", 305);
+
+        // Reload from disk
+        let reloaded = Store::load(&dir);
+        let jobs = reloaded.take_active_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "job123");
+        assert_eq!(jobs[0].status_msg, Some(305));
+
+        // After take_active_jobs, store has no active jobs
+        assert!(reloaded.take_active_jobs().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
