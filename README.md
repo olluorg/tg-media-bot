@@ -112,6 +112,38 @@ sudo systemctl daemon-reload && sudo systemctl enable --now tg-media-bot
 
 ---
 
+## Обновление бота
+
+Если бот запущен через **Docker Compose** (стандартный способ):
+
+```bash
+cd tg-media-bot
+docker compose pull && docker compose up -d
+```
+> *Примечание: движок `yt-dlp` внутри контейнера также обновляется автоматически раз в сутки (когда нет активных загрузок).*
+
+<details>
+<summary><b>При установке из исходников</b></summary>
+
+**Docker (локальная сборка):**
+```bash
+cd tg-media-bot
+git pull
+docker compose up -d --build
+```
+
+**systemd:**
+```bash
+cd tg-media-bot
+git pull
+cargo build --release
+sudo install -m755 target/release/tg-media-bot /usr/local/bin/
+sudo systemctl restart tg-media-bot
+```
+</details>
+
+---
+
 ## Команды бота
 
 | Команда | Описание |
