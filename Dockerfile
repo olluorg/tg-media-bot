@@ -22,10 +22,11 @@ RUN touch src/main.rs && cargo build --release --locked
 # ---- runtime ----------------------------------------------------------------
 FROM python:3.12-slim-bookworm
 
-# QuickJS: ultra-lightweight JS engine for YouTube player challenges (~5 MB RAM vs ~300 MB with Deno).
-RUN apt-get update && apt-get install -y --no-install-recommends quickjs \
-    && rm -rf /var/lib/apt/lists/* \
-    && (ln -s /usr/bin/qjs /usr/local/bin/quickjs 2>/dev/null || true)
+ARG QUICKJS_VERSION=v0.8.0
+
+# QuickJS-ng: ultra-lightweight JS engine for YouTube player challenges (~5 MB RAM vs ~300 MB with Deno).
+ADD --chmod=755 https://github.com/quickjs-ng/quickjs/releases/download/${QUICKJS_VERSION}/qjs-linux-x86_64 /usr/local/bin/qjs
+RUN ln -s /usr/local/bin/qjs /usr/local/bin/quickjs
 
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
     && python -m venv /opt/yt-dlp \

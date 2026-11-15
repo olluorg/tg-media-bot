@@ -29,8 +29,8 @@ services:
     depends_on:
       - bot
     restart: unless-stopped
-    mem_limit: 256m
-    cpus: 0.5
+    mem_limit: 512m
+    cpus: 1.0
     pids_limit: 64
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "8081"]
@@ -45,9 +45,8 @@ services:
         max-file: "3"
 
   bot:
-    image: ghcr.io/olluorg/tg-media-bot:edge
-    # To build from source locally instead of pulling the prebuilt image:
-    # build: .
+    build: .
+    image: tg-media-bot:local
     env_file: .env
     environment:
       API_SERVER_URL: http://telegram-bot-api:8081
@@ -69,8 +68,8 @@ services:
       start_period: 15s
     # The bot itself needs ~10 MB; the rest is headroom for one yt-dlp +
     # ffmpeg run. If you raise MAX_PARALLEL_DOWNLOADS, raise this too.
-    mem_limit: 768m
-    memswap_limit: 768m
+    mem_limit: 1024m
+    memswap_limit: 1024m
     cpus: 1.0
     pids_limit: 256
     stop_grace_period: 20s

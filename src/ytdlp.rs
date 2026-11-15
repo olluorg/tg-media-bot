@@ -444,6 +444,8 @@ fn base_args(cfg: &Config, net: &NetOpts) -> Vec<String> {
         "--no-write-comments",
         "--no-write-subs",
         "--no-write-playlist-metafiles",
+        "--js-runtimes",
+        "quickjs",
     ]
     .iter()
     .map(|s| s.to_string())
