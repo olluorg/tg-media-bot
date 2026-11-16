@@ -849,16 +849,27 @@ impl Store {
         let _ = conn.execute("UPDATE user_subscriptions SET is_paused = 1 WHERE user_id = ?1", params![user_id]);
     }
 
-    pub fn get_next_channel_for_rss(&self) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+    pub fn get_next_channel_for_rss(
+        &self,
+        checked_before: u64,
+    ) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT channel_id, etag, last_modified, last_video_id FROM tracked_channels
+             WHERE last_checked_at < ?1
              ORDER BY last_checked_at ASC LIMIT 1",
-            [],
+            params![checked_before as i64],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .unwrap_or(None)
+    }
+
+    pub fn get_oldest_channel_check_time(&self) -> Option<u64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row("SELECT MIN(last_checked_at) FROM tracked_channels", [], |r| r.get::<_, Option<i64>>(0))
+            .unwrap_or(None)
+            .map(|t| t.max(0) as u64)
     }
 
     pub fn touch_channel_checked(&self, channel_id: &str) {
@@ -1175,6 +1186,13 @@ mod tests {
         assert!(!last_left1); // 200 still subscribed
         let last_left2 = store.remove_subscription(200, "UC12345").unwrap();
         assert!(last_left2); // 0 subscribers left, returns true for WebSub unsubscription!
+
+        // 6. Cooldown query
+        store.add_subscription(100, "UC999", "Another Channel", None).unwrap();
+        let now = now_secs();
+        assert!(store.get_next_channel_for_rss(now.saturating_sub(600)).is_none());
+        assert!(store.get_next_channel_for_rss(now + 1).is_some());
+        assert!(store.get_oldest_channel_check_time().is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

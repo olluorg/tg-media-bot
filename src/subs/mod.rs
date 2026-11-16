@@ -55,7 +55,9 @@ pub fn start_subscription_subsystem(app: Arc<App>) {
     let app_rss = app.clone();
     let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
     let rss_cfg = rss::RssWorkerConfig {
-        check_interval: Duration::from_secs(app.cfg.rss_check_interval_secs),
+        min_delay: Duration::from_secs(app.cfg.rss_min_delay_secs),
+        max_delay: Duration::from_secs(app.cfg.rss_max_delay_secs),
+        channel_cooldown: Duration::from_secs(app.cfg.rss_channel_cooldown_secs),
         websub_callback: app.cfg.websub_public_url.clone(),
         websub_secret: app.cfg.websub_secret.clone(),
     };

@@ -1,4 +1,4 @@
-//! Rolling RSS fallback worker and lease renewal loop.
+//! Rolling RSS fallback worker with dynamic jitter delay and per-channel cooldown.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +13,9 @@ use crate::app::App;
 use crate::state::Store;
 
 pub struct RssWorkerConfig {
-    pub check_interval: Duration,
+    pub min_delay: Duration,
+    pub max_delay: Duration,
+    pub channel_cooldown: Duration,
     pub websub_callback: Option<String>,
     pub websub_secret: Option<String>,
 }
@@ -24,7 +26,12 @@ pub async fn run_rss_worker(
     notify_tx: UnboundedSender<NewVideoNotification>,
     cfg: RssWorkerConfig,
 ) {
-    log::info!("Starting YouTube RSS fallback worker with interval {:?}", cfg.check_interval);
+    log::info!(
+        "Starting YouTube RSS fallback worker (delay: {:?}..{:?}, per-channel cooldown: {:?})",
+        cfg.min_delay,
+        cfg.max_delay,
+        cfg.channel_cooldown
+    );
 
     let mut last_lease_check = std::time::Instant::now() - Duration::from_secs(3600);
 
@@ -37,11 +44,21 @@ pub async fn run_rss_worker(
             }
         }
 
-        // 2. Fetch the channel with the oldest check time
-        let next_channel = app.store.get_next_channel_for_rss();
+        // 2. Fetch the channel with the oldest check time that has exceeded the cooldown
+        let now = crate::state::now_secs();
+        let checked_before = now.saturating_sub(cfg.channel_cooldown.as_secs());
+        let next_channel = app.store.get_next_channel_for_rss(checked_before);
+
         let Some((channel_id, etag, last_modified, last_video_id)) = next_channel else {
-            // No channels to check, idle
-            tokio::time::sleep(Duration::from_secs(15)).await;
+            // No channels ready for check right now.
+            // Sleep until the earliest channel becomes eligible, or 15s if table is empty.
+            let sleep_secs = if let Some(oldest_check) = app.store.get_oldest_channel_check_time() {
+                let eligible_at = oldest_check + cfg.channel_cooldown.as_secs();
+                eligible_at.saturating_sub(now).clamp(5, 60)
+            } else {
+                15
+            };
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
             continue;
         };
 
@@ -106,10 +123,23 @@ pub async fn run_rss_worker(
             }
         }
 
-        // Sleep with small jitter between checks
-        let jitter_ms = (crate::state::now_secs() % 500) as u64;
-        tokio::time::sleep(cfg.check_interval + Duration::from_millis(jitter_ms)).await;
+        // Random dynamic jitter delay between min_delay and max_delay
+        let delay = random_delay(cfg.min_delay, cfg.max_delay);
+        tokio::time::sleep(delay).await;
     }
+}
+
+fn random_delay(min: Duration, max: Duration) -> Duration {
+    if min >= max {
+        return min;
+    }
+    let min_ms = min.as_millis() as u64;
+    let max_ms = max.as_millis() as u64;
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let span = max_ms - min_ms;
+    let offset = (nanos as u64) % span;
+    Duration::from_millis(min_ms + offset)
 }
 
 fn process_feed_entries(
@@ -173,5 +203,21 @@ async fn renew_expiring_leases(store: &Store, http: &reqwest::Client, callback_u
         }
         // Small delay between renewal requests
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_random_delay_bounds() {
+        let min = Duration::from_secs(3);
+        let max = Duration::from_secs(8);
+        for _ in 0..50 {
+            let d = random_delay(min, max);
+            assert!(d >= min);
+            assert!(d <= max);
+        }
     }
 }

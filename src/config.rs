@@ -82,7 +82,9 @@ pub struct Config {
     pub websub_bind_addr: String,
     pub websub_secret: Option<String>,
     pub premium_limit: usize,
-    pub rss_check_interval_secs: u64,
+    pub rss_min_delay_secs: u64,
+    pub rss_max_delay_secs: u64,
+    pub rss_channel_cooldown_secs: u64,
 }
 
 /// Process environment layered over a `.env` file (real env wins).
@@ -260,10 +262,15 @@ impl Config {
 
             subs_enabled: env.flag("SUBSCRIPTIONS_ENABLED", true),
             websub_public_url: env.get("WEBSUB_URL"),
-            websub_bind_addr: env.get("WEBSUB_BIND").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
+            websub_bind_addr: env.get("WEBSUB_BIND").unwrap_or_else(|| {
+                let port = env.get("WEBSUB_PORT").unwrap_or_else(|| "8080".to_string());
+                format!("0.0.0.0:{port}")
+            }),
             websub_secret: env.get("WEBSUB_SECRET"),
             premium_limit: env.num("PREMIUM_CHANNEL_LIMIT", 25usize)?.clamp(1, 1000),
-            rss_check_interval_secs: env.num("RSS_CHECK_INTERVAL_SECS", 4u64)?.clamp(1, 300),
+            rss_min_delay_secs: env.num("RSS_MIN_DELAY_SECS", 3u64)?.clamp(1, 3600),
+            rss_max_delay_secs: env.num("RSS_MAX_DELAY_SECS", 8u64)?.clamp(1, 3600),
+            rss_channel_cooldown_secs: env.num("RSS_CHANNEL_COOLDOWN_SECS", 600u64)?.clamp(60, 86400),
         })
     }
 
