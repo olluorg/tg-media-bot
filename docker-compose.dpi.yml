@@ -50,6 +50,8 @@ services:
       PLUGIN_DIR: /plugins
       # Optional: custom nfqws2 desync parameters
       # NFQWS2_OPT: "--lua-desync=multidisorder:pos=1,midsld"
+    ports:
+      - "${WEBSUB_PORT:-8080}:8080"
     volumes:
       - bot-data:/data
       - bot-tmp:/data/tmp

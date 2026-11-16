@@ -84,6 +84,7 @@ ENV PATH=/opt/yt-dlp/bin:$PATH \
 
 WORKDIR /data
 VOLUME ["/data"]
+EXPOSE 8080
 
 # ---- runtime-dpi (DPI bypass with zapret2) ----------------------------------
 FROM base-runtime AS runtime-dpi
