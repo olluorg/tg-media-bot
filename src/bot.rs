@@ -731,10 +731,22 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 app.say(chat, thread, "Usage: /broadcast &lt;message&gt;", None).await;
                 return;
             }
-            let chats = app.store.known_chats();
+            let mut targets = std::collections::HashSet::new();
+            for id in app.store.known_chats() {
+                targets.insert(id);
+            }
+            for id in app.stats.all_user_ids() {
+                targets.insert(id);
+            }
+            for id in &app.cfg.allowed_users {
+                targets.insert(*id);
+            }
+            targets.insert(chat);
+            targets.insert(ctx.user);
+
             let mut sent = 0usize;
             let mut failed = 0usize;
-            for target_chat in chats {
+            for target_chat in targets {
                 match app.bot.send_message(target_chat, None, args, None, None).await {
                     Ok(_) => sent += 1,
                     Err(_) => failed += 1,

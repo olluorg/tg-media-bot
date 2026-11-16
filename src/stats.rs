@@ -1075,6 +1075,19 @@ impl StatsDb {
             user_summary
         )
     }
+
+    pub fn all_user_ids(&self) -> Vec<i64> {
+        let Ok(conn) = self.conn.lock() else { return Vec::new() };
+        let mut stmt = match conn.prepare("SELECT user_id FROM users UNION SELECT DISTINCT user_id FROM downloads") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map([], |r| r.get::<_, i64>(0)) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.flatten().collect()
+    }
 }
 
 fn format_day_label(ts: i64) -> String {

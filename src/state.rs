@@ -637,8 +637,23 @@ impl Store {
     }
 
     pub fn known_chats(&self) -> Vec<i64> {
+        let mut set = std::collections::HashSet::new();
         let chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
-        chats.keys().copied().collect()
+        set.extend(chats.keys().copied());
+        let quality = self.quality.lock().unwrap_or_else(|e| e.into_inner());
+        set.extend(quality.keys().copied());
+        if let Ok(conn) = self.conn.lock() {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT chat_id FROM chats UNION SELECT user_id FROM user_quality UNION SELECT chat_id FROM saved_jobs",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) {
+                    for id in rows.flatten() {
+                        set.insert(id);
+                    }
+                }
+            }
+        }
+        set.into_iter().collect()
     }
 
     /// Passive WAL checkpoint and vacuum freed pages
