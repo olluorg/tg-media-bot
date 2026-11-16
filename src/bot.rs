@@ -1039,7 +1039,9 @@ async fn handle_inline_query(app: &Arc<App>, iq: InlineQuery) {
                 "parse_mode": "HTML",
             }),
         };
-        let _ = app.bot.answer_inline_query(&iq.id, &[result], Some(300), true, None, None).await;
+        if let Err(e) = app.bot.answer_inline_query(&iq.id, &[result], Some(300), true, None, None).await {
+            log::warn!("answerInlineQuery failed: {e}");
+        }
     } else {
         // Cache miss: stash URL for instant download when user clicks the switch_pm button
         let token = app.stash_urls(iq.from.id, vec![url.clone()], None);
@@ -1055,10 +1057,13 @@ async fn handle_inline_query(app: &Arc<App>, iq: InlineQuery) {
                 "parse_mode": "HTML",
             }
         });
-        let _ = app
+        if let Err(e) = app
             .bot
             .answer_inline_query(&iq.id, &[article], Some(10), true, Some(t.inline_switch_pm), Some(&param))
-            .await;
+            .await
+        {
+            log::warn!("answerInlineQuery failed: {e}");
+        }
     }
 }
 

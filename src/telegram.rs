@@ -473,9 +473,13 @@ impl Bot {
         }
         if let Some(text) = switch_pm_text {
             body["switch_pm_text"] = json!(text);
-        }
-        if let Some(param) = switch_pm_parameter {
-            body["switch_pm_parameter"] = json!(param);
+            if let Some(param) = switch_pm_parameter {
+                body["switch_pm_parameter"] = json!(param);
+                body["button"] = json!({
+                    "text": text,
+                    "start_parameter": param,
+                });
+            }
         }
         self.call::<IgnoredAny>("answerInlineQuery", &body, SHORT_TIMEOUT).await.map(|_| ())
     }
