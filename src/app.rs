@@ -242,29 +242,46 @@ pub fn lower_quality_keyboard(t: &Strings, token: &str, current: Quality) -> Opt
     Some(json!({ "inline_keyboard": rows }))
 }
 
-fn build_caption(title: &str, url: &str) -> String {
+pub fn build_caption(title: &str, url: &str, credit: Option<&str>) -> String {
     let escaped_url = html_escape(url);
     let title = title.trim();
+    let credit_clean = credit.map(str::trim).filter(|c| !c.is_empty());
+    let credit_overhead = credit_clean.map(|c| c.chars().count() + 2).unwrap_or(0);
+
     if title.is_empty() {
-        let mut res = String::with_capacity(escaped_url.len() + 14);
+        let mut res = String::with_capacity(escaped_url.len() + 14 + credit_overhead);
         res.push_str("<code>");
         res.push_str(&escaped_url);
         res.push_str("</code>");
+        if let Some(c) = credit_clean {
+            res.push_str("\n\n");
+            res.push_str(&html_escape(c));
+        }
         return util::truncate_chars(&res, CAPTION_MAX).to_string();
     }
     // Entities are counted after parsing, so budget on the raw title length.
-    let budget = CAPTION_MAX.saturating_sub(url.chars().count() + 4);
+    let budget = CAPTION_MAX.saturating_sub(url.chars().count() + 4 + credit_overhead);
     if budget < 8 {
+        let mut res = String::with_capacity(CAPTION_MAX);
         let escaped = html_escape(title);
-        return util::truncate_chars(&escaped, CAPTION_MAX).to_string();
+        res.push_str(util::truncate_chars(&escaped, CAPTION_MAX.saturating_sub(credit_overhead)));
+        if let Some(c) = credit_clean {
+            res.push_str("\n\n");
+            res.push_str(&html_escape(c));
+        }
+        return util::truncate_chars(&res, CAPTION_MAX).to_string();
     }
     let title = util::truncate_chars(title, budget);
     let escaped_title = html_escape(title);
-    let mut res = String::with_capacity(escaped_title.len() + escaped_url.len() + 16);
+    let mut res = String::with_capacity(escaped_title.len() + escaped_url.len() + 16 + credit_overhead);
     res.push_str(&escaped_title);
     res.push_str("\n\n<code>");
     res.push_str(&escaped_url);
     res.push_str("</code>");
+    if let Some(c) = credit_clean {
+        res.push_str("\n\n");
+        res.push_str(&html_escape(c));
+    }
     res
 }
 
@@ -1036,7 +1053,10 @@ impl App {
             "audio" => MediaKind::Audio,
             _ => MediaKind::Document,
         };
-        let caption = (!job.minimal).then(|| build_caption(&entry.title, &job.url));
+        let credit = (!self.bot.username.is_empty()).then(|| {
+            fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)])
+        });
+        let caption = (!job.minimal).then(|| build_caption(&entry.title, &job.url, credit.as_deref()));
         let media = Media {
             kind,
             chat_id: job.chat_id,
@@ -1062,7 +1082,10 @@ impl App {
     }
 
     async fn upload(&self, job: &Job, ready: &Ready) -> Result<Message, TgError> {
-        let caption = (!job.minimal).then(|| build_caption(&ready.title, &job.url));
+        let credit = (!self.bot.username.is_empty()).then(|| {
+            fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)])
+        });
+        let caption = (!job.minimal).then(|| build_caption(&ready.title, &job.url, credit.as_deref()));
         let source = if self.cfg.local_api_files { Source::LocalUri(&ready.path) } else { Source::Upload(&ready.path) };
         let mut media = Media {
             kind: ready.kind,
@@ -1371,15 +1394,26 @@ mod tests {
     #[test]
     fn captions() {
         assert_eq!(
-            build_caption("A & B", "https://x.com/?a=1&b=2"),
+            build_caption("A & B", "https://x.com/?a=1&b=2", None),
             "A &amp; B\n\n<code>https://x.com/?a=1&amp;b=2</code>"
         );
-        assert_eq!(build_caption("  ", "https://x.com"), "<code>https://x.com</code>");
+        assert_eq!(build_caption("  ", "https://x.com", None), "<code>https://x.com</code>");
         let long = "я".repeat(5000);
-        let c = build_caption(&long, "https://x.com/v");
+        let c = build_caption(&long, "https://x.com/v", None);
         let visible = c.replace("<code>", "").replace("</code>", "");
         assert!(visible.chars().count() <= CAPTION_MAX);
         assert!(c.ends_with("<code>https://x.com/v</code>"));
+
+        // With attribution
+        let credited = build_caption("Cute Cat", "https://x.com/cat", Some("📥 via @samplebot"));
+        assert_eq!(
+            credited,
+            "Cute Cat\n\n<code>https://x.com/cat</code>\n\n📥 via @samplebot"
+        );
+        let long_credited = build_caption(&long, "https://x.com/v", Some("📥 via @samplebot"));
+        let visible_cred = long_credited.replace("<code>", "").replace("</code>", "");
+        assert!(visible_cred.chars().count() <= CAPTION_MAX);
+        assert!(long_credited.ends_with("📥 via @samplebot"));
     }
 
     #[test]

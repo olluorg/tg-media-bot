@@ -5,11 +5,12 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::app::{stage_label, App, Cancel, Refusal, Request};
+use crate::cachekey;
 use crate::i18n::{fill, Lang, Strings, LANG_PROMPT};
 use crate::state;
 use crate::sys;
-use crate::telegram::{CallbackQuery, Media, MediaKind, Message, Source, Update, User};
-use crate::types::{Quality, Stage};
+use crate::telegram::{CallbackQuery, InlineQuery, Media, MediaKind, Message, Source, Update, User};
+use crate::types::{Kind, Quality, Stage};
 use crate::util;
 
 /// Links taken from one message.
@@ -303,6 +304,8 @@ pub async fn handle(app: Arc<App>, update: Update) {
         handle_message(&app, msg).await;
     } else if let Some(cb) = update.callback_query {
         handle_callback(&app, cb).await;
+    } else if let Some(iq) = update.inline_query {
+        handle_inline_query(&app, iq).await;
     }
 }
 
@@ -519,7 +522,26 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
     let first = words.next().map(str::to_ascii_lowercase);
 
     match cmd {
-        "start" => app.say(chat, thread, &format!("{}\n\n{LANG_PROMPT}", t.welcome), Some(lang_keyboard())).await,
+        "start" => {
+            if let Some(token) = args.strip_prefix("dl_").filter(|s| !s.is_empty()) {
+                if let Ok((urls, _)) = app.take_urls(token, ctx.user) {
+                    if !urls.is_empty() {
+                        let room = app.user_room(ctx.user);
+                        if room == 0 {
+                            let text = Refusal::UserQueueFull.text(t, app.cfg.user_queue, app.cfg.user_queue);
+                            app.say(chat, thread, &text, None).await;
+                            return;
+                        }
+                        match app.store.default_quality(ctx.user) {
+                            Some(q) => enqueue_all(app, ctx, urls, q, None, None).await,
+                            None => ask_quality(app, ctx, urls, None).await,
+                        }
+                        return;
+                    }
+                }
+            }
+            app.say(chat, thread, &format!("{}\n\n{LANG_PROMPT}", t.welcome), Some(lang_keyboard())).await
+        }
         "help" => {
             let mut limits = fill(
                 t.help_limits,
@@ -908,6 +930,138 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
     }
 }
 
+async fn handle_inline_query(app: &Arc<App>, iq: InlineQuery) {
+    app.stats.record_user(iq.from.id, iq.from.username.as_deref(), iq.from.first_name.as_deref());
+    let lang = app.lang_for(iq.from.id, Some(&iq.from));
+    let t = lang.t();
+
+    if !app.cfg.allowed_users.is_empty() && !app.cfg.allowed_users.contains(&iq.from.id) {
+        log::warn!("denied inline query from user {}", iq.from.id);
+        let article = json!({
+            "type": "article",
+            "id": "unauth",
+            "title": t.not_authorized,
+            "input_message_content": {
+                "message_text": t.not_authorized,
+            }
+        });
+        let _ = app.bot.answer_inline_query(&iq.id, &[article], Some(300), true, None, None).await;
+        return;
+    }
+
+    let query = iq.query.trim();
+    if query.is_empty() {
+        let article = json!({
+            "type": "article",
+            "id": "prompt",
+            "title": t.inline_prompt_title,
+            "description": t.inline_prompt_desc,
+            "input_message_content": {
+                "message_text": format!("@{}", app.bot.username),
+            }
+        });
+        let _ = app
+            .bot
+            .answer_inline_query(&iq.id, &[article], Some(300), true, Some(t.inline_switch_pm), Some("inline"))
+            .await;
+        return;
+    }
+
+    let urls = util::extract_urls(query, 1);
+    let Some(url) = urls.first().cloned() else {
+        let article = json!({
+            "type": "article",
+            "id": "invalid",
+            "title": t.inline_prompt_title,
+            "description": t.inline_prompt_desc,
+            "input_message_content": {
+                "message_text": format!("@{}", app.bot.username),
+            }
+        });
+        let _ = app
+            .bot
+            .answer_inline_query(&iq.id, &[article], Some(300), true, Some(t.inline_switch_pm), Some("inline"))
+            .await;
+        return;
+    };
+
+    if app.cfg.block_private && util::is_private_url(&url) {
+        let article = json!({
+            "type": "article",
+            "id": "private",
+            "title": t.private_url,
+            "input_message_content": {
+                "message_text": t.private_url,
+            }
+        });
+        let _ = app.bot.answer_inline_query(&iq.id, &[article], Some(300), true, None, None).await;
+        return;
+    }
+
+    let video_key = cachekey::video_key(&url);
+    let mut candidate_keys = vec![
+        cachekey::request_key(&video_key, Quality::Max),
+        cachekey::delivered_key(&video_key, Kind::Video, None),
+    ];
+    for &h in &Quality::HEIGHTS {
+        candidate_keys.push(cachekey::request_key(&video_key, Quality::Height(h)));
+        candidate_keys.push(cachekey::delivered_key(&video_key, Kind::Video, Some(h)));
+    }
+    candidate_keys.push(cachekey::request_key(&video_key, Quality::Audio));
+    candidate_keys.push(cachekey::delivered_key(&video_key, Kind::Audio, None));
+
+    if let Some(entry) = app.store.cache_find(&candidate_keys) {
+        let credit = (!app.bot.username.is_empty())
+            .then(|| fill(t.caption_credit, &[("bot", &app.bot.username)]));
+        let caption = crate::app::build_caption(&entry.title, &url, credit.as_deref());
+        let result = match entry.kind.as_str() {
+            "audio" => json!({
+                "type": "audio",
+                "id": "cached_audio",
+                "audio_file_id": entry.file_id,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }),
+            "document" => json!({
+                "type": "document",
+                "id": "cached_doc",
+                "document_file_id": entry.file_id,
+                "title": if entry.title.is_empty() { "Document" } else { &entry.title },
+                "caption": caption,
+                "parse_mode": "HTML",
+            }),
+            _ => json!({
+                "type": "video",
+                "id": "cached_video",
+                "video_file_id": entry.file_id,
+                "title": if entry.title.is_empty() { "Video" } else { &entry.title },
+                "caption": caption,
+                "parse_mode": "HTML",
+            }),
+        };
+        let _ = app.bot.answer_inline_query(&iq.id, &[result], Some(300), true, None, None).await;
+    } else {
+        // Cache miss: stash URL for instant download when user clicks the switch_pm button
+        let token = app.stash_urls(iq.from.id, vec![url.clone()], None);
+        let param = format!("dl_{token}");
+        let escaped_url = util::html_escape(&url);
+        let article = json!({
+            "type": "article",
+            "id": "miss",
+            "title": t.inline_not_found_title,
+            "description": t.inline_not_found_desc,
+            "input_message_content": {
+                "message_text": format!("<code>{escaped_url}</code>"),
+                "parse_mode": "HTML",
+            }
+        });
+        let _ = app
+            .bot
+            .answer_inline_query(&iq.id, &[article], Some(10), true, Some(t.inline_switch_pm), Some(&param))
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,6 +1143,13 @@ mod tests {
                 assert!(b["callback_data"].as_str().unwrap().starts_with("c:"));
             }
         }
+
+        // Test start parameter dl_<token> stashing and consumption
+        let token = app.stash_urls(42, vec!["https://youtu.be/test12345".into()], None);
+        assert!(!token.is_empty());
+        let (stashed_urls, _) = app.take_urls(&token, 42).expect("token should be valid");
+        assert_eq!(stashed_urls, vec!["https://youtu.be/test12345"]);
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

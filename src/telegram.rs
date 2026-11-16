@@ -152,9 +152,20 @@ pub struct CallbackQuery {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct InlineQuery {
+    pub id: String,
+    pub from: User,
+    pub query: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub offset: String,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct Update {
     pub message: Option<Message>,
     pub callback_query: Option<CallbackQuery>,
+    pub inline_query: Option<InlineQuery>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -263,7 +274,7 @@ impl Bot {
             "offset": offset,
             "timeout": wait_secs,
             "limit": 50,
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": ["message", "callback_query", "inline_query"],
         });
         let raw: Vec<Value> = self.call("getUpdates", &body, Duration::from_secs(wait_secs + 15)).await?;
         let mut next = offset;
@@ -441,6 +452,32 @@ impl Bot {
         if let Err(e) = self.call::<IgnoredAny>("answerCallbackQuery", &body, SHORT_TIMEOUT).await {
             log::debug!("answerCallbackQuery: {e}");
         }
+    }
+
+    pub async fn answer_inline_query(
+        &self,
+        inline_query_id: &str,
+        results: &[Value],
+        cache_time: Option<u32>,
+        is_personal: bool,
+        switch_pm_text: Option<&str>,
+        switch_pm_parameter: Option<&str>,
+    ) -> Result<(), TgError> {
+        let mut body = json!({
+            "inline_query_id": inline_query_id,
+            "results": results,
+            "is_personal": is_personal,
+        });
+        if let Some(ct) = cache_time {
+            body["cache_time"] = json!(ct);
+        }
+        if let Some(text) = switch_pm_text {
+            body["switch_pm_text"] = json!(text);
+        }
+        if let Some(param) = switch_pm_parameter {
+            body["switch_pm_parameter"] = json!(param);
+        }
+        self.call::<IgnoredAny>("answerInlineQuery", &body, SHORT_TIMEOUT).await.map(|_| ())
     }
 
     /// `commands` is a list of `(command, description)`. `language` scopes the

@@ -50,6 +50,8 @@ strings! {
     e_no_space, e_timeout, e_probe_timeout, e_upload, e_upload_big, e_internal,
     // command menu
     c_start, c_help, c_quality, c_status, c_mystats, c_cancel, c_clear, c_minimal, c_topic, c_lang,
+    // attribution & inline mode
+    caption_credit, inline_not_found_title, inline_not_found_desc, inline_prompt_title, inline_prompt_desc, inline_switch_pm,
 }
 
 /// Shown above the language buttons; deliberately multilingual.

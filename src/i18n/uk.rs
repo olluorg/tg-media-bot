@@ -113,4 +113,10 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud і ще
     c_minimal: "Мінімальний інтерфейс: on|off",
     c_topic: "Працювати в одній темі: lock|unlock|status",
     c_lang: "Мова",
+    caption_credit: "📥 Завантажено через @{bot}",
+    inline_not_found_title: "Медіа ще немає в кеші",
+    inline_not_found_desc: "Натисніть кнопку нижче, щоб завантажити його в боті",
+    inline_prompt_title: "Вставте посилання на медіа",
+    inline_prompt_desc: "Підтримуються YouTube, TikTok, Reels, VK, Pinterest та ін.",
+    inline_switch_pm: "🎬 Завантажити в боті",
 };

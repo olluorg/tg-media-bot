@@ -113,4 +113,10 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     c_minimal: "Minimal UI: on|off",
     c_topic: "Stay in one topic: lock|unlock|status",
     c_lang: "Language",
+    caption_credit: "📥 via @{bot}",
+    inline_not_found_title: "Media not in cache yet",
+    inline_not_found_desc: "Click the button below to download it in bot",
+    inline_prompt_title: "Send a media link",
+    inline_prompt_desc: "Supports YouTube, TikTok, Reels, VK, Pinterest and more",
+    inline_switch_pm: "🎬 Download in bot",
 };
