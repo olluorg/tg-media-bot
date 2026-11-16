@@ -389,7 +389,17 @@ impl Bot {
 
     pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), TgError> {
         let body = json!({ "chat_id": chat_id, "message_id": message_id });
-        self.call::<IgnoredAny>("deleteMessage", &body, SHORT_TIMEOUT).await.map(|_| ())
+        for _ in 0..=3 {
+            match self.call::<IgnoredAny>("deleteMessage", &body, SHORT_TIMEOUT).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e.retry_after().is_some_and(|s| s <= 30) => {
+                    tokio::time::sleep(Duration::from_secs(e.retry_after().unwrap_or(1) + 1)).await;
+                }
+                Err(TgError::Api { desc, .. }) if desc.contains("message to delete not found") => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     pub async fn send_chat_action(&self, chat_id: i64, action: &str, thread_id: Option<i64>) -> Result<(), TgError> {

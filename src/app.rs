@@ -1229,7 +1229,7 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
             let to_delete = app.status_msg(&job.id).or(status_msg);
             if let Some(msg) = to_delete {
                 if let Err(e) = app.bot.delete_message(job.chat_id, msg).await {
-                    log::debug!("could not delete status message: {e}");
+                    log::warn!("could not delete status message {msg} for job {}: {e}", job.id);
                 }
             }
             if job.chat_id > 0 {
