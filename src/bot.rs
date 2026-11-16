@@ -535,38 +535,29 @@ async fn handle_menu_action(app: &Arc<App>, _msg: &Message, ctx: &Ctx, action: M
         MenuAction::Search => {
             let is_premium = app.store.is_user_premium(ctx.user);
             if is_premium {
-                let (prompt, btn_text) = match ctx.lang {
-                    Lang::Ru => (
+                let prompt = match ctx.lang {
+                    Lang::Ru => {
                         "🔍 <b>Поиск видео на YouTube</b>\n\n\
-                         • Отправьте поисковый запрос текстом прямо в чат (например: <code>Queen</code>)\n\
-                         • Либо нажмите кнопку ниже для быстрого inline-поиска:",
-                        "🔎 Искать в этом чате",
-                    ),
-                    Lang::Uk => (
+                         Введите поисковый запрос текстом прямо в этот чат (например: <code>Queen</code> или <code>стендап</code>).\n\n\
+                         Бот найдёт видео и покажет карточки с кнопками быстрого скачивания!"
+                    },
+                    Lang::Uk => {
                         "🔍 <b>Пошук відео на YouTube</b>\n\n\
-                         • Надішліть пошуковий запит текстом у чат (наприклад: <code>Queen</code>)\n\
-                         • Або натисніть кнопку нижче для швидкого inline-пошуку:",
-                        "🔎 Шукати в цьому чаті",
-                    ),
-                    Lang::Es => (
-                        "🔍 <b>Buscar videos en YouTube</b>\n\n\
-                         • Envía tu búsqueda por texto a este chat (ejemplo: <code>Queen</code>)\n\
-                         • O pulsa el botón de abajo para búsqueda inline:",
-                        "🔎 Buscar en este chat",
-                    ),
-                    _ => (
+                         Введіть пошуковий запит текстом прямо в цей чат (наприклад: <code>Queen</code>).\n\n\
+                         Бот знайде відео та надішле картки з кнопками швидкого завантаження!"
+                    }
+                    Lang::Es => {
+                        "🔍 <b>Búsqueda de videos en YouTube</b>\n\n\
+                         Escribe tu búsqueda por texto directamente en este chat (por ejemplo: <code>Queen</code>).\n\n\
+                         ¡El bot encontrará los videos con opciones de descarga rápida!"
+                    }
+                    _ => {
                         "🔍 <b>YouTube Video Search</b>\n\n\
-                         • Send your search query directly into this chat (e.g. <code>Queen</code>)\n\
-                         • Or click the button below for inline search:",
-                        "🔎 Search in this chat",
-                    ),
+                         Send your search query directly into this chat (e.g. <code>Queen</code>).\n\n\
+                         The bot will find videos and send cards with instant download options!"
+                    },
                 };
-                let kb = json!({
-                    "inline_keyboard": [
-                        [{ "text": btn_text, "switch_inline_query_current_chat": "" }]
-                    ]
-                });
-                app.say(chat, thread, prompt, Some(kb)).await;
+                app.say(chat, thread, prompt, None).await;
             } else {
                 let prompt = match ctx.lang {
                     Lang::Ru => "⭐ <b>Поиск видео по YouTube доступен с Premium</b>\n\nС Premium вы можете искать и сразу скачивать любые ролики прямо в Telegram!",
