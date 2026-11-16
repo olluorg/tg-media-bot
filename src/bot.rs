@@ -701,6 +701,26 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
             };
             app.say(chat, thread, &text, Some(kb)).await;
         }
+        "version" | "ver" => {
+            if !app.is_admin(ctx.user) {
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
+                return;
+            }
+            let version = env!("CARGO_PKG_VERSION");
+            let ytdlp_ver = crate::ytdlp::version(&app.cfg).await.unwrap_or_else(|| "n/a".into());
+            let uptime = util::fmt_duration(app.uptime().as_secs());
+            let text = format!(
+                "🤖 <b>tg-media-bot</b> <code>v{version}</code>\n\
+                 • <b>yt-dlp:</b> <code>{ytdlp_ver}</code>\n\
+                 • <b>Uptime:</b> {}\n\
+                 • <b>API:</b> {}",
+                uptime,
+                if app.cfg.local_api { "local Bot API" } else { "api.telegram.org" }
+            );
+            app.say(chat, thread, &text, None).await;
+        }
         "backup" => {
             if !app.is_admin(ctx.user) {
                 if !msg.chat.is_group() {
