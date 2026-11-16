@@ -287,12 +287,7 @@ pub fn render_status(job: &Job) -> String {
     let _ = write!(text, "<b>{}</b> · {}", stage_label(t, &stage), job.quality.label(t));
     if let Some(title) = job.title() {
         if !title.trim().is_empty() {
-            let _ = write!(
-                text,
-                "\n🎬 <a href=\"{}\"><b>{}</b></a>",
-                html_escape(&job.url),
-                html_escape(&title)
-            );
+            let _ = write!(text, "\n🎬 <a href=\"{}\"><b>{}</b></a>", html_escape(&job.url), html_escape(&title));
         }
     } else {
         let _ = write!(

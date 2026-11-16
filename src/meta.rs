@@ -127,17 +127,13 @@ impl TitleResolver {
     pub async fn resolve_meta(&self, url: &str) -> ResolvedMeta {
         if !self.breaker.can_request() {
             log::debug!("skipping metadata resolve for {url}: circuit breaker is open");
-            let mut meta = ResolvedMeta::default();
-            meta.thumb_url = quick_thumb(url);
-            return meta;
+            return ResolvedMeta { thumb_url: quick_thumb(url), ..Default::default() };
         }
 
         let host = match crate::util::host_of(url) {
             Some(h) => h,
             None => {
-                let mut meta = ResolvedMeta::default();
-                meta.thumb_url = quick_thumb(url);
-                return meta;
+                return ResolvedMeta { thumb_url: quick_thumb(url), ..Default::default() };
             }
         };
         if crate::util::is_private_url(url) {
@@ -173,16 +169,12 @@ impl TitleResolver {
             }
             Err(ResolveError::RateLimited) => {
                 self.breaker.record_failure(true);
-                let mut meta = ResolvedMeta::default();
-                meta.thumb_url = quick_thumb(url);
-                meta
+                ResolvedMeta { thumb_url: quick_thumb(url), ..Default::default() }
             }
             Err(ResolveError::Other(e)) => {
                 log::debug!("failed to resolve metadata for {url}: {e}");
                 self.breaker.record_failure(false);
-                let mut meta = ResolvedMeta::default();
-                meta.thumb_url = quick_thumb(url);
-                meta
+                ResolvedMeta { thumb_url: quick_thumb(url), ..Default::default() }
             }
         }
     }
