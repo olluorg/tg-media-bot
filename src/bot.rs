@@ -6,8 +6,9 @@ use serde_json::{json, Value};
 
 use crate::app::{stage_label, App, Cancel, Refusal, Request};
 use crate::i18n::{fill, Lang, Strings, LANG_PROMPT};
+use crate::state;
 use crate::sys;
-use crate::telegram::{CallbackQuery, Message, Update, User};
+use crate::telegram::{CallbackQuery, Media, MediaKind, Message, Source, Update, User};
 use crate::types::{Quality, Stage};
 use crate::util;
 
@@ -23,6 +24,7 @@ pub fn command_list(t: &Strings) -> Vec<(&'static str, &'static str)> {
         ("help", t.c_help),
         ("quality", t.c_quality),
         ("status", t.c_status),
+        ("mystats", t.c_mystats),
         ("cancel", t.c_cancel),
         ("clear", t.c_clear),
         ("lang", t.c_lang),
@@ -58,6 +60,153 @@ fn default_keyboard(t: &Strings, max_height: u32) -> Value {
     let mut rows = quality_rows(t, max_height, |code| format!("d:{code}"));
     rows.push(vec![json!({ "text": t.btn_ask, "callback_data": "d:ask" })]);
     json!({ "inline_keyboard": rows })
+}
+
+fn stats_keyboard() -> Value {
+    json!({
+        "inline_keyboard": [
+            [
+                { "text": "📊 Сводка", "callback_data": "st:summary" },
+                { "text": "📈 Тренд 7д", "callback_data": "st:trend" }
+            ],
+            [
+                { "text": "⚠️ Ошибки", "callback_data": "st:errors" },
+                { "text": "🏆 Топ", "callback_data": "st:top" }
+            ],
+            [
+                { "text": "🌐 Платформы", "callback_data": "st:platforms" },
+                { "text": "⚙️ Система", "callback_data": "st:system" }
+            ],
+            [
+                { "text": "💾 Скачать бэкап базы (.db)", "callback_data": "st:backup" }
+            ]
+        ]
+    })
+}
+
+fn top_keyboard(current_days: u64) -> Value {
+    let b_today = if current_days == 1 { "• Сегодня •" } else { "Сегодня" };
+    let b_week = if current_days == 7 { "• 7 дней •" } else { "7 дней" };
+    let b_all = if current_days == 0 { "• Всё время •" } else { "Всё время" };
+    json!({
+        "inline_keyboard": [
+            [
+                { "text": b_today, "callback_data": "st:top:1" },
+                { "text": b_week, "callback_data": "st:top:7" },
+                { "text": b_all, "callback_data": "st:top:0" }
+            ],
+            [
+                { "text": "◀ Назад в меню", "callback_data": "st:summary" }
+            ]
+        ]
+    })
+}
+
+async fn send_backup(app: &Arc<App>, admin_user_id: i64, origin_chat_id: i64, origin_thread_id: Option<i64>) {
+    let now = state::now_secs();
+    let file_name = format!("bot_backup_{now}.db");
+    let backup_path = app.cfg.temp_dir.join(&file_name);
+    let _ = std::fs::create_dir_all(&app.cfg.temp_dir);
+
+    if let Err(e) = app.stats.backup(&backup_path) {
+        log::error!("hot backup failed: {e}");
+        if origin_chat_id == admin_user_id {
+            app.say(admin_user_id, None, "❌ Не удалось создать бэкап базы данных.", None).await;
+        } else {
+            app.say(origin_chat_id, origin_thread_id, "❌ Не удалось создать бэкап базы данных.", None).await;
+        }
+        return;
+    }
+
+    let media = Media {
+        kind: MediaKind::Document,
+        chat_id: admin_user_id, // ALWAYS send to admin's private chat!
+        thread_id: None,
+        source: Source::Upload(&backup_path),
+        file_name: &file_name,
+        caption: Some("💾 <b>Резервная копия базы данных</b> (SQLite: <code>bot.db</code>)"),
+        duration: None,
+        width: None,
+        height: None,
+        title: None,
+        performer: None,
+        thumb: None,
+    };
+
+    match app.bot.send_media(&media, None).await {
+        Ok(_) => {
+            if origin_chat_id != admin_user_id {
+                app.say(
+                    origin_chat_id,
+                    origin_thread_id,
+                    "📩 Бэкап базы данных отправлен вам в личные сообщения.",
+                    None,
+                )
+                .await;
+            }
+        }
+        Err(e) => {
+            log::error!("failed to send backup to {admin_user_id}: {e}");
+            let err_msg = format!("❌ Не удалось отправить бэкап в ЛС: {e}. Убедитесь, что вы запустили бота в личных сообщениях (/start).");
+            if origin_chat_id == admin_user_id {
+                app.say(admin_user_id, None, &err_msg, None).await;
+            } else {
+                app.say(origin_chat_id, origin_thread_id, &err_msg, None).await;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&backup_path);
+}
+
+fn render_system_status(app: &App) -> String {
+    let uptime = util::fmt_duration(app.uptime().as_secs());
+    let active = app.active_jobs();
+    let cache_entries = app.store.cache_count();
+    let mem = sys::process_memory_mb().map(|m| format!("{m} MB")).unwrap_or_else(|| "n/a".to_string());
+    let disk = sys::free_space_mb(&app.cfg.temp_dir).map(|d| format!("{d} MB")).unwrap_or_else(|| "n/a".to_string());
+
+    format!(
+        "⚙️ <b>Системный статус и конфигурация</b>\n\n\
+         • <b>Версия:</b> <code>tg-media-bot {}</code>\n\
+         • <b>Uptime:</b> {}\n\
+         • <b>Активные процессы:</b> {}\n\
+         • <b>Записей в кэше:</b> {}\n\
+         • <b>RAM (RSS):</b> {}\n\
+         • <b>Свободно на диске:</b> {}\n\n\
+         ⚙️ <b>Параметры и лимиты:</b>\n\
+         • Параллельные загрузки: {} (на пользователя: {})\n\
+         • Макс. размер файла: {}\n\
+         • Макс. длительность: {}\n\
+         • Таймаут: {}\n\
+         • Разрешённые пользователи: {}\n\
+         • Администраторы: {}",
+        env!("CARGO_PKG_VERSION"),
+        uptime,
+        active,
+        cache_entries,
+        mem,
+        disk,
+        app.cfg.max_parallel,
+        app.cfg.per_user,
+        util::fmt_size(app.cfg.max_file_bytes),
+        if app.cfg.max_duration > 0 {
+            util::fmt_duration(app.cfg.max_duration)
+        } else {
+            "без ограничений".into()
+        },
+        util::fmt_duration(app.cfg.download_timeout),
+        if app.cfg.allowed_users.is_empty() {
+            "все (публичный)".into()
+        } else {
+            app.cfg.allowed_users.len().to_string()
+        },
+        if app.cfg.admin_users.is_empty() {
+            "разрешённые пользователи".into()
+        } else {
+            app.cfg.admin_users.len().to_string()
+        },
+    )
 }
 
 fn status_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
@@ -309,6 +458,7 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
     if user.is_bot {
         return;
     }
+    app.stats.record_user(user.id, user.username.as_deref(), user.first_name.as_deref());
     let text = msg.text.as_deref().or(msg.caption.as_deref()).unwrap_or("").to_string();
     let command = parse_command(&text, &app.bot.username);
     if text.starts_with('/') && command.is_none() {
@@ -504,68 +654,77 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 _ => app.say(chat, thread, t.topic_usage, None).await,
             }
         }
+        "mystats" | "me" => {
+            let text = app.stats.render_user_stats(ctx.user);
+            app.say(chat, thread, &text, None).await;
+        }
         "stats" | "admin" => {
             if !app.is_admin(ctx.user) {
-                app.say(chat, thread, t.not_authorized, None).await;
+                if !msg.chat.is_group() {
+                    let text = format!(
+                        "ℹ️ <i>Полная статистика бота доступна только администраторам.</i>\n\n{}",
+                        app.stats.render_user_stats(ctx.user)
+                    );
+                    app.say(chat, thread, &text, None).await;
+                }
                 return;
             }
-            let uptime = util::fmt_duration(app.uptime().as_secs());
-            let active = app.active_jobs();
-            let cache_entries = app.store.cache_count();
-            let mem = sys::process_memory_mb().map(|m| format!("{m} MB")).unwrap_or_else(|| "n/a".to_string());
-            let disk =
-                sys::free_space_mb(&app.cfg.temp_dir).map(|d| format!("{d} MB")).unwrap_or_else(|| "n/a".to_string());
-
-            let text = format!(
-                "📊 <b>System & Bot Status</b>\n\n\
-                 • <b>Version:</b> <code>tg-media-bot {}</code>\n\
-                 • <b>Uptime:</b> {}\n\
-                 • <b>Active jobs:</b> {}\n\
-                 • <b>Cache entries:</b> {}\n\
-                 • <b>RAM (RSS):</b> {}\n\
-                 • <b>Disk free:</b> {}\n\n\
-                 ⚙️ <b>Limits & Config:</b>\n\
-                 • Parallel downloads: {} (per user: {})\n\
-                 • Max file size: {}\n\
-                 • Max duration: {}\n\
-                 • Timeout: {}\n\
-                 • Allowed users: {}\n\
-                 • Admins: {}",
-                env!("CARGO_PKG_VERSION"),
-                uptime,
-                active,
-                cache_entries,
-                mem,
-                disk,
-                app.cfg.max_parallel,
-                app.cfg.per_user,
-                util::fmt_size(app.cfg.max_file_bytes),
-                if app.cfg.max_duration > 0 { util::fmt_duration(app.cfg.max_duration) } else { "unlimited".into() },
-                util::fmt_duration(app.cfg.download_timeout),
-                if app.cfg.allowed_users.is_empty() {
-                    "public".into()
-                } else {
-                    app.cfg.allowed_users.len().to_string()
-                },
-                if app.cfg.admin_users.is_empty() {
-                    "allowed users".into()
-                } else {
-                    app.cfg.admin_users.len().to_string()
-                },
-            );
+            let (text, kb) = match first.as_deref() {
+                Some("top") => (app.stats.render_top_users_period(0), top_keyboard(0)),
+                Some("plat" | "platforms") => (app.stats.render_platforms(), stats_keyboard()),
+                Some("trend") => (app.stats.render_trend(), stats_keyboard()),
+                Some("err" | "errors") => (app.stats.render_errors(), stats_keyboard()),
+                Some("sys" | "system") => (render_system_status(app), stats_keyboard()),
+                _ => (app.stats.render_summary(), stats_keyboard()),
+            };
+            app.say(chat, thread, &text, Some(kb)).await;
+        }
+        "backup" => {
+            if !app.is_admin(ctx.user) {
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
+                return;
+            }
+            send_backup(app, ctx.user, chat, thread).await;
+        }
+        "digest" => {
+            if !app.is_admin(ctx.user) {
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
+                return;
+            }
+            let text = app.stats.render_daily_digest();
             app.say(chat, thread, &text, None).await;
         }
         "clean_cache" | "cleancache" => {
             if !app.is_admin(ctx.user) {
-                app.say(chat, thread, t.not_authorized, None).await;
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
                 return;
             }
             let count = app.store.clear_cache();
             app.say(chat, thread, &format!("🧹 Cache cleared: {count} entries removed."), None).await;
         }
+        "prune_stats" | "prunestats" => {
+            if !app.is_admin(ctx.user) {
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
+                return;
+            }
+            let days: u64 = first.as_deref().and_then(|s| s.parse().ok()).unwrap_or(365);
+            let removed = app.stats.prune_downloads(days);
+            let text = format!("🧹 Удалено <b>{removed}</b> записей скачиваний старше <b>{days}</b> дней.");
+            app.say(chat, thread, &text, None).await;
+        }
         "broadcast" => {
             if !app.is_admin(ctx.user) {
-                app.say(chat, thread, t.not_authorized, None).await;
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
                 return;
             }
             if args.trim().is_empty() {
@@ -593,6 +752,7 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
 }
 
 async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
+    app.stats.record_user(cb.from.id, cb.from.username.as_deref(), cb.from.first_name.as_deref());
     let data = cb.data.clone().unwrap_or_default();
     let Some(msg) = cb.message.as_ref() else {
         app.bot.answer_callback(&cb.id, None, false).await;
@@ -608,6 +768,36 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
 
     let (prefix, rest) = data.split_once(':').unwrap_or((data.as_str(), ""));
     match prefix {
+        "st" => {
+            if !app.is_admin(cb.from.id) {
+                app.bot.answer_callback(&cb.id, Some(t.not_authorized), true).await;
+                return;
+            }
+            if rest == "backup" {
+                app.bot.answer_callback(&cb.id, Some("Создаю бэкап базы данных..."), false).await;
+                send_backup(app, cb.from.id, msg.chat.id, msg.thread()).await;
+                return;
+            }
+            app.bot.answer_callback(&cb.id, None, false).await;
+            let (text, kb) = if let Some(days_str) = rest.strip_prefix("top:") {
+                let days = days_str.parse::<u64>().unwrap_or(0);
+                (app.stats.render_top_users_period(days), top_keyboard(days))
+            } else if rest == "top" {
+                (app.stats.render_top_users_period(0), top_keyboard(0))
+            } else {
+                let text = match rest {
+                    "platforms" => app.stats.render_platforms(),
+                    "trend" => app.stats.render_trend(),
+                    "errors" => app.stats.render_errors(),
+                    "system" => render_system_status(app),
+                    _ => app.stats.render_summary(),
+                };
+                (text, stats_keyboard())
+            };
+            if let Err(e) = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await {
+                log::debug!("edit stats failed: {e}");
+            }
+        }
         "l" => {
             let Some(new) = Lang::from_code(rest) else {
                 app.bot.answer_callback(&cb.id, None, false).await;
@@ -723,9 +913,13 @@ mod tests {
 
     #[test]
     fn keyboards_fit_callback_limits() {
-        for kb in
-            [lang_keyboard(), picker_keyboard(Lang::Uk.t(), "ffffffabc", 1080), default_keyboard(Lang::Es.t(), 1080)]
-        {
+        for kb in [
+            lang_keyboard(),
+            picker_keyboard(Lang::Uk.t(), "ffffffabc", 1080),
+            default_keyboard(Lang::Es.t(), 1080),
+            stats_keyboard(),
+            top_keyboard(0),
+        ] {
             for row in kb["inline_keyboard"].as_array().unwrap() {
                 for b in row.as_array().unwrap() {
                     assert!(b["callback_data"].as_str().unwrap().len() <= 64);
@@ -736,7 +930,7 @@ mod tests {
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
-        assert_eq!(command_list(Lang::Ru.t()).len(), 9);
+        assert_eq!(command_list(Lang::Ru.t()).len(), 10);
         let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080)).unwrap();
         let lq_str = lq.to_string();
         assert!(
@@ -750,7 +944,9 @@ mod tests {
 
     #[tokio::test]
     async fn status_menu_renders_and_fits_limits() {
-        let env = crate::config::Env::from_pairs(&[("BOT_TOKEN", "123:abc")]);
+        let temp_dir = std::env::temp_dir().join(format!("tgmb-bot-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let env = crate::config::Env::from_pairs(&[("BOT_TOKEN", "123:abc"), ("DATA_DIR", temp_dir.to_str().unwrap())]);
         let cfg = crate::config::Config::from_env(&env).unwrap();
         let bot = crate::telegram::Bot::new(&cfg).unwrap();
         let store = crate::state::Store::load(&cfg.data_dir);
@@ -781,5 +977,6 @@ mod tests {
                 assert!(b["callback_data"].as_str().unwrap().starts_with("c:"));
             }
         }
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

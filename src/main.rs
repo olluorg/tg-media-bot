@@ -15,6 +15,7 @@ mod meta;
 mod plugins;
 mod proc;
 mod state;
+mod stats;
 mod sys;
 mod telegram;
 mod types;
@@ -192,6 +193,31 @@ async fn housekeeping(app: Arc<App>) {
     }
 }
 
+async fn daily_digest_loop(app: Arc<App>) {
+    let mut last_sent_day = (state::now_secs() / 86400) as i64;
+    let mut interval = tokio::time::interval(Duration::from_secs(1800));
+    loop {
+        interval.tick().await;
+        let current_day = (state::now_secs() / 86400) as i64;
+        if current_day > last_sent_day {
+            last_sent_day = current_day;
+            // Daily maintenance: prune logs older than 1 year
+            app.stats.prune_downloads(365);
+            let admin_ids: Vec<i64> = if !app.cfg.admin_users.is_empty() {
+                app.cfg.admin_users.iter().copied().collect()
+            } else {
+                app.cfg.allowed_users.iter().copied().collect()
+            };
+            if !admin_ids.is_empty() {
+                let text = app.stats.render_daily_digest();
+                for admin_id in admin_ids {
+                    app.say(admin_id, None, &text, None).await;
+                }
+            }
+        }
+    }
+}
+
 async fn run(cfg: Config) -> i32 {
     let stats = match prepare_dirs(&cfg) {
         Ok(s) => s,
@@ -249,6 +275,7 @@ async fn run(cfg: Config) -> i32 {
     tokio::spawn(register_commands(app.clone()));
     tokio::spawn(housekeeping(app.clone()));
     tokio::spawn(updater(app.clone()));
+    tokio::spawn(daily_digest_loop(app.clone()));
 
     // Recover interrupted jobs from previous run / crash
     let saved_jobs = app.store.take_active_jobs();

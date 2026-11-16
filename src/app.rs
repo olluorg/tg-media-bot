@@ -144,6 +144,7 @@ pub struct App {
     pub cfg: Config,
     pub bot: Bot,
     pub store: Store,
+    pub stats: Arc<crate::stats::StatsDb>,
     pub plugins: Plugins,
     pub meta: Arc<crate::meta::TitleResolver>,
     /// Global download slots (MAX_PARALLEL_DOWNLOADS).
@@ -398,6 +399,7 @@ fn cache_entry(msg: &Message, ready: &Ready) -> Option<CacheEntry> {
         title: ready.title.clone(),
         performer: ready.performer.clone(),
         duration: ready.duration,
+        size: ready.size,
         ts: 0,
     })
 }
@@ -427,10 +429,18 @@ impl App {
     pub fn new(cfg: Config, bot: Bot, store: Store, plugins: Plugins) -> App {
         let slots = Semaphore::new(cfg.max_parallel);
         let upload_slots = Semaphore::new(cfg.max_parallel.max(1));
+        let stats = match crate::stats::StatsDb::open(&cfg.data_dir.join("bot.db")) {
+            Ok(db) => Arc::new(db),
+            Err(e) => {
+                log::error!("failed to open bot.db for stats: {e}; falling back to in-memory stats");
+                Arc::new(crate::stats::StatsDb::in_memory().expect("in-memory stats db"))
+            }
+        };
         App {
             cfg,
             bot,
             store,
+            stats,
             plugins,
             meta: Arc::new(crate::meta::TitleResolver::new()),
             slots,
@@ -1126,6 +1136,16 @@ impl App {
                     drop(dl_slot.take());
                     if self.send_cached(job, &entry).await {
                         log::info!("job {} served from cache after probe ({:?})", job.id, probed.video_key);
+                        self.stats.record_download(
+                            job.user_id,
+                            &job.url,
+                            &entry.kind,
+                            entry.size,
+                            entry.duration,
+                            true,
+                            "success",
+                            None,
+                        );
                         self.store.cache_put(&store_keys(job, &probed), entry);
                         return Ok(());
                     }
@@ -1155,6 +1175,21 @@ impl App {
                         .map_err(|_| JobError::Dl(DlError::Internal("shutting down".into())))?;
                     let msg =
                         self.upload(job, &ready).await.map_err(|err| JobError::Upload { size: ready.size, err })?;
+                    let kind_str = match ready.kind {
+                        MediaKind::Video => "video",
+                        MediaKind::Audio => "audio",
+                        MediaKind::Document => "document",
+                    };
+                    self.stats.record_download(
+                        job.user_id,
+                        &job.url,
+                        kind_str,
+                        ready.size,
+                        ready.duration,
+                        false,
+                        "success",
+                        None,
+                    );
                     if let Some(entry) = cache_entry(&msg, &ready) {
                         self.store.cache_put(&store_keys(job, &ready.probed), entry);
                     }
@@ -1183,6 +1218,16 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
         app.store.title_put(&job.video_key, &entry.title);
         if app.send_cached(&job, &entry).await {
             log::info!("job {} served from cache", job.id);
+            app.stats.record_download(
+                job.user_id,
+                &job.url,
+                &entry.kind,
+                entry.size,
+                entry.duration,
+                true,
+                "success",
+                None,
+            );
             if let Some(msg) = app.status_msg(&job.id) {
                 let _ = app.bot.delete_message(job.chat_id, msg).await;
             }
@@ -1241,6 +1286,38 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
             }
         }
         Err(err) => {
+            let kind_str = match job.quality.kind() {
+                Kind::Audio => "audio",
+                Kind::Video => "video",
+            };
+            let error_reason = match &err {
+                JobError::TooBigToSend(_) | JobError::Dl(DlError::Rejected(Reject::TooLarge { .. })) => {
+                    "Превышен размер файла (> лимита)"
+                }
+                JobError::Dl(DlError::Rejected(Reject::TooLong { .. })) => "Превышена длительность",
+                JobError::Dl(DlError::Rejected(Reject::Live)) => "Прямой эфир (Live стрим)",
+                JobError::Dl(DlError::DownloadTimeout) => "Таймаут скачивания",
+                JobError::Dl(DlError::ProbeTimeout) => "Таймаут получения информации",
+                JobError::NoSpace => "Нет свободного места на сервере",
+                JobError::Upload { .. } => "Ошибка отправки в Telegram",
+                JobError::Dl(DlError::Failed(msg)) => {
+                    let low = msg.to_lowercase();
+                    if low.contains("private") || low.contains("login") || low.contains("sign in") {
+                        "Приватное видео / требуется авторизация"
+                    } else if low.contains("country") || low.contains("geo") || low.contains("not available") {
+                        "Гео-блокировка"
+                    } else if low.contains("unsupported") {
+                        "Неподдерживаемый сервис"
+                    } else if low.contains("copyright") || low.contains("drm") {
+                        "Защита авторских прав / DRM"
+                    } else {
+                        "Ошибка yt-dlp / сети"
+                    }
+                }
+                JobError::Dl(DlError::Internal(_)) => "Внутренняя ошибка",
+                _ => "Другая ошибка",
+            };
+            app.stats.record_download(job.user_id, &job.url, kind_str, 0, 0, false, "error", Some(error_reason));
             match &err {
                 JobError::Dl(DlError::Internal(e)) => log::error!("job {} internal error: {e}", job.id),
                 JobError::Upload { err, .. } => log::error!("job {} upload failed: {err}", job.id),

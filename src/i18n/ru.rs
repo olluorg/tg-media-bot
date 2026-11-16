@@ -107,6 +107,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud и ещ
     c_help: "Справка и поддерживаемые сайты",
     c_quality: "Качество по умолчанию",
     c_status: "Твоя очередь",
+    c_mystats: "Твоя личная статистика",
     c_cancel: "Отменить загрузку (или все)",
     c_clear: "Очистить историю сообщений: [число]",
     c_minimal: "Минимальный интерфейс: on|off",

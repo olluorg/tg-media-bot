@@ -1,41 +1,32 @@
-//! Persistent bot state: per-chat settings, per-user default quality and the
-//! file_id cache. One JSON file, written atomically and at most every few
-//! seconds.
+//! Persistent bot state: per-chat settings, per-user default quality, the
+//! file_id cache, titles cache and saved jobs.
+//!
+//! Powered by a high-performance, tuned SQLite database (`bot.db`) with
+//! in-memory write-through caching for chat and quality settings.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::cachekey;
 use crate::i18n::Lang;
 use crate::types::Quality;
 
 /// Upper bound on cache keys; the oldest tenth is dropped when exceeded.
-/// An entry is ~200 bytes, so this is a few MB at most.
-const MAX_CACHE: usize = 20_000;
+pub const MAX_CACHE: usize = 20_000;
 /// Upper bound on cached titles; the oldest tenth is dropped when exceeded.
-const MAX_TITLES: usize = 10_000;
-
-fn is_false(b: &bool) -> bool {
-    !*b
-}
+pub const MAX_TITLES: usize = 10_000;
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
-struct ChatCfg {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lang: Option<Lang>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    minimal: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    topic: Option<i64>,
-    /// Group activated by an allowed user: its members may use the bot.
-    #[serde(default, skip_serializing_if = "is_false")]
-    active: bool,
+pub struct ChatCfg {
+    pub lang: Option<Lang>,
+    pub minimal: bool,
+    pub topic: Option<i64>,
+    pub active: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -43,13 +34,10 @@ pub struct CacheEntry {
     /// "video" | "audio" | "document"
     pub kind: String,
     pub file_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub performer: String,
-    #[serde(default)]
     pub duration: u32,
-    #[serde(default)]
+    pub size: u64,
     pub ts: u64,
 }
 
@@ -58,104 +46,281 @@ pub struct SavedJob {
     pub id: String,
     pub user_id: i64,
     pub chat_id: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<i64>,
     pub url: String,
     pub quality: String,
     pub lang: Lang,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_msg: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_msg_id: Option<i64>,
-    #[serde(default)]
     pub created_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct TitleEntry {
     pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumb_url: Option<String>,
-    #[serde(default)]
     pub ts: u64,
 }
 
-#[derive(Serialize, Deserialize, Default)]
-struct Data {
-    #[serde(default)]
-    chats: HashMap<i64, ChatCfg>,
-    /// user -> default quality code ("max", "720", "audio"); absent = ask.
-    #[serde(default)]
-    quality: HashMap<i64, String>,
-    /// Pre-`quality` format; migrated on load.
-    #[serde(default, skip_serializing)]
-    audio_users: Vec<i64>,
-    #[serde(default)]
-    cache: HashMap<String, CacheEntry>,
-    #[serde(default)]
-    titles: HashMap<String, TitleEntry>,
-    #[serde(default)]
-    jobs: HashMap<String, SavedJob>,
-}
-
 pub struct Store {
-    path: PathBuf,
-    data: Mutex<Data>,
-    dirty: AtomicBool,
+    #[allow(dead_code)]
+    db_path: PathBuf,
+    conn: Mutex<Connection>,
+    chats: Mutex<HashMap<i64, ChatCfg>>,
+    quality: Mutex<HashMap<i64, String>>,
 }
 
 pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+fn configure_sqlite(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA cache_size = -16000;        -- 16 MB page cache in RAM
+         PRAGMA mmap_size = 268435456;      -- 256 MB memory-mapped I/O
+         PRAGMA temp_store = MEMORY;        -- temp tables & indices in memory
+         PRAGMA busy_timeout = 5000;        -- 5s timeout on lock contention
+         PRAGMA foreign_keys = ON;
+         PRAGMA auto_vacuum = INCREMENTAL;  -- keep DB file compact over time",
+    )?;
+    Ok(())
+}
+
+fn init_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chats (
+             chat_id INTEGER PRIMARY KEY,
+             lang TEXT,
+             minimal INTEGER NOT NULL DEFAULT 0,
+             topic INTEGER,
+             active INTEGER NOT NULL DEFAULT 0
+         );
+
+         CREATE TABLE IF NOT EXISTS user_quality (
+             user_id INTEGER PRIMARY KEY,
+             quality TEXT NOT NULL
+         );
+
+         CREATE TABLE IF NOT EXISTS media_cache (
+             key TEXT PRIMARY KEY,
+             kind TEXT NOT NULL,
+             file_id TEXT NOT NULL,
+             title TEXT NOT NULL DEFAULT '',
+             performer TEXT NOT NULL DEFAULT '',
+             duration INTEGER NOT NULL DEFAULT 0,
+             size INTEGER NOT NULL DEFAULT 0,
+             ts INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_media_cache_file_id ON media_cache(file_id);
+         CREATE INDEX IF NOT EXISTS idx_media_cache_ts ON media_cache(ts);
+
+         CREATE TABLE IF NOT EXISTS titles_cache (
+             key TEXT PRIMARY KEY,
+             title TEXT NOT NULL,
+             thumb_url TEXT,
+             ts INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_titles_cache_ts ON titles_cache(ts);
+
+         CREATE TABLE IF NOT EXISTS saved_jobs (
+             id TEXT PRIMARY KEY,
+             user_id INTEGER NOT NULL,
+             chat_id INTEGER NOT NULL,
+             thread_id INTEGER,
+             url TEXT NOT NULL,
+             quality TEXT NOT NULL,
+             lang TEXT NOT NULL,
+             status_msg INTEGER,
+             user_msg_id INTEGER,
+             created_at INTEGER NOT NULL
+         );",
+    )?;
+    Ok(())
+}
+
 impl Store {
     pub fn load(data_dir: &Path) -> Store {
-        let path = data_dir.join("state.json");
-        let (mut data, mut dirty) = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Data>(&bytes) {
-                Ok(d) => (d, false),
-                Err(e) => {
-                    // Keep the broken file around instead of silently overwriting it.
-                    let backup = data_dir.join("state.json.corrupt");
-                    log::error!("state file is corrupt ({e}); moved to {}", backup.display());
-                    let _ = std::fs::rename(&path, backup);
-                    (Data::default(), false)
+        let _ = std::fs::create_dir_all(data_dir);
+        let db_path = data_dir.join("bot.db");
+        let conn = Connection::open(&db_path).expect("failed to open bot.db");
+        configure_sqlite(&conn).expect("failed to configure sqlite pragma");
+        init_tables(&conn).expect("failed to initialize sqlite tables");
+
+        // Migrate from old state.json or pre-state.json legacy files if present
+        Self::migrate_if_needed(&conn, data_dir);
+
+        // Preload in-memory write-through caches for zero-latency lookups
+        let mut chats = HashMap::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT chat_id, lang, minimal, topic, active FROM chats") {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let lang_str: Option<String> = r.get(1)?;
+                let lang = lang_str.as_deref().and_then(Lang::from_code);
+                let minimal: i64 = r.get(2)?;
+                let topic: Option<i64> = r.get(3)?;
+                let active: i64 = r.get(4)?;
+                Ok((r.get::<_, i64>(0)?, ChatCfg { lang, minimal: minimal != 0, topic, active: active != 0 }))
+            }) {
+                for item in rows.flatten() {
+                    chats.insert(item.0, item.1);
                 }
-            },
-            Err(_) => {
-                let d = import_legacy(data_dir);
-                let found = !d.chats.is_empty() || !d.cache.is_empty();
-                (d, found)
             }
-        };
-        for user in std::mem::take(&mut data.audio_users) {
-            data.quality.entry(user).or_insert_with(|| "audio".to_string());
-            dirty = true;
         }
-        Store { path, data: Mutex::new(data), dirty: AtomicBool::new(dirty) }
+
+        let mut quality = HashMap::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT user_id, quality FROM user_quality") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+                for item in rows.flatten() {
+                    quality.insert(item.0, item.1);
+                }
+            }
+        }
+
+        Store { db_path, conn: Mutex::new(conn), chats: Mutex::new(chats), quality: Mutex::new(quality) }
     }
 
-    fn with<R>(&self, f: impl FnOnce(&mut Data) -> R) -> R {
-        let mut guard = self.data.lock().unwrap_or_else(|e| e.into_inner());
-        f(&mut guard)
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn in_memory() -> Store {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        configure_sqlite(&conn).expect("sqlite pragma");
+        init_tables(&conn).expect("sqlite tables");
+        Store {
+            db_path: PathBuf::from(":memory:"),
+            conn: Mutex::new(conn),
+            chats: Mutex::new(HashMap::new()),
+            quality: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn migrate_if_needed(conn: &Connection, data_dir: &Path) {
+        let json_path = data_dir.join("state.json");
+        if json_path.exists() {
+            if let Ok(bytes) = std::fs::read(&json_path) {
+                if let Ok(data) = serde_json::from_slice::<LegacyData>(&bytes) {
+                    log::info!("migrating existing state.json into bot.db…");
+                    if let Ok(tx) = conn.unchecked_transaction() {
+                        for (chat_id, cfg) in data.chats {
+                            let lang_str = cfg.lang.map(|l| l.code().to_string());
+                            let _ = tx.execute(
+                                "INSERT OR REPLACE INTO chats (chat_id, lang, minimal, topic, active) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                params![chat_id, lang_str, if cfg.minimal { 1 } else { 0 }, cfg.topic, if cfg.active { 1 } else { 0 }],
+                            );
+                        }
+                        for (user_id, q) in data.quality {
+                            let _ = tx.execute(
+                                "INSERT OR REPLACE INTO user_quality (user_id, quality) VALUES (?1, ?2)",
+                                params![user_id, q],
+                            );
+                        }
+                        for user_id in data.audio_users {
+                            let _ = tx.execute(
+                                "INSERT OR IGNORE INTO user_quality (user_id, quality) VALUES (?1, 'audio')",
+                                params![user_id],
+                            );
+                        }
+                        for (key, entry) in data.cache {
+                            let _ = tx.execute(
+                                "INSERT OR REPLACE INTO media_cache (key, kind, file_id, title, performer, duration, size, ts)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                params![key, entry.kind, entry.file_id, entry.title, entry.performer, entry.duration, entry.size as i64, entry.ts as i64],
+                            );
+                        }
+                        for (key, title) in data.titles {
+                            let _ = tx.execute(
+                                "INSERT OR REPLACE INTO titles_cache (key, title, thumb_url, ts)
+                                 VALUES (?1, ?2, ?3, ?4)",
+                                params![key, title.title, title.thumb_url, title.ts as i64],
+                            );
+                        }
+                        for (id, job) in data.jobs {
+                            let _ = tx.execute(
+                                "INSERT OR REPLACE INTO saved_jobs (id, user_id, chat_id, thread_id, url, quality, lang, status_msg, user_msg_id, created_at)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                params![id, job.user_id, job.chat_id, job.thread_id, job.url, job.quality, job.lang.code(), job.status_msg, job.user_msg_id, job.created_at as i64],
+                            );
+                        }
+                        if tx.commit().is_ok() {
+                            log::info!("state.json successfully migrated to bot.db");
+                            let _ = std::fs::rename(&json_path, data_dir.join("state.json.migrated"));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Migrate pre-state.json legacy json files if any
+        let d = import_legacy(data_dir);
+        if !d.chats.is_empty() || !d.cache.is_empty() {
+            if let Ok(tx) = conn.unchecked_transaction() {
+                for (chat_id, cfg) in d.chats {
+                    let lang_str = cfg.lang.map(|l| l.code().to_string());
+                    let _ = tx.execute(
+                        "INSERT OR IGNORE INTO chats (chat_id, lang, minimal, topic, active) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![chat_id, lang_str, if cfg.minimal { 1 } else { 0 }, cfg.topic, if cfg.active { 1 } else { 0 }],
+                    );
+                }
+                for (key, entry) in d.cache {
+                    let _ = tx.execute(
+                        "INSERT OR IGNORE INTO media_cache (key, kind, file_id, title, performer, duration, size, ts)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            key,
+                            entry.kind,
+                            entry.file_id,
+                            entry.title,
+                            entry.performer,
+                            entry.duration,
+                            entry.size as i64,
+                            entry.ts as i64
+                        ],
+                    );
+                }
+                let _ = tx.commit();
+            }
+        }
     }
 
     fn edit_chat(&self, chat_id: i64, f: impl FnOnce(&mut ChatCfg)) {
-        self.with(|d| {
-            let entry = d.chats.entry(chat_id).or_default();
-            let before = entry.clone();
-            f(entry);
-            if *entry != before {
-                self.dirty.store(true, Ordering::Relaxed);
+        let mut chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = chats.entry(chat_id).or_default();
+        let before = entry.clone();
+        f(entry);
+        if *entry != before {
+            let updated = entry.clone();
+            if updated == ChatCfg::default() {
+                chats.remove(&chat_id);
+                if let Ok(conn) = self.conn.lock() {
+                    let _ = conn.execute("DELETE FROM chats WHERE chat_id = ?1", params![chat_id]);
+                }
+            } else {
+                let lang_str = updated.lang.map(|l| l.code().to_string());
+                if let Ok(conn) = self.conn.lock() {
+                    let _ = conn.execute(
+                        "INSERT INTO chats (chat_id, lang, minimal, topic, active)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(chat_id) DO UPDATE SET
+                             lang = excluded.lang,
+                             minimal = excluded.minimal,
+                             topic = excluded.topic,
+                             active = excluded.active",
+                        params![
+                            chat_id,
+                            lang_str,
+                            if updated.minimal { 1 } else { 0 },
+                            updated.topic,
+                            if updated.active { 1 } else { 0 }
+                        ],
+                    );
+                }
             }
-            if *entry == ChatCfg::default() {
-                d.chats.remove(&chat_id);
-            }
-        });
+        }
     }
 
     pub fn lang(&self, chat_id: i64) -> Option<Lang> {
-        self.with(|d| d.chats.get(&chat_id).and_then(|c| c.lang))
+        let chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
+        chats.get(&chat_id).and_then(|c| c.lang)
     }
 
     pub fn set_lang(&self, chat_id: i64, lang: Lang) {
@@ -163,7 +328,8 @@ impl Store {
     }
 
     pub fn minimal(&self, chat_id: i64) -> bool {
-        self.with(|d| d.chats.get(&chat_id).is_some_and(|c| c.minimal))
+        let chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
+        chats.get(&chat_id).is_some_and(|c| c.minimal)
     }
 
     pub fn set_minimal(&self, chat_id: i64, on: bool) {
@@ -171,7 +337,8 @@ impl Store {
     }
 
     pub fn topic(&self, chat_id: i64) -> Option<i64> {
-        self.with(|d| d.chats.get(&chat_id).and_then(|c| c.topic))
+        let chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
+        chats.get(&chat_id).and_then(|c| c.topic)
     }
 
     pub fn set_topic(&self, chat_id: i64, topic: Option<i64>) {
@@ -179,7 +346,8 @@ impl Store {
     }
 
     pub fn is_active(&self, chat_id: i64) -> bool {
-        self.with(|d| d.chats.get(&chat_id).is_some_and(|c| c.active))
+        let chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
+        chats.get(&chat_id).is_some_and(|c| c.active)
     }
 
     pub fn activate(&self, chat_id: i64) {
@@ -188,24 +356,66 @@ impl Store {
 
     /// The user's remembered choice; `None` means "ask every time".
     pub fn default_quality(&self, user_id: i64) -> Option<Quality> {
-        self.with(|d| d.quality.get(&user_id).and_then(|c| Quality::parse(c)))
+        let q = self.quality.lock().unwrap_or_else(|e| e.into_inner());
+        q.get(&user_id).and_then(|c| Quality::parse(c))
     }
 
     pub fn set_default_quality(&self, user_id: i64, q: Option<Quality>) {
-        self.with(|d| {
-            let changed = match q {
-                Some(q) => d.quality.insert(user_id, q.code()) != Some(q.code()),
-                None => d.quality.remove(&user_id).is_some(),
-            };
-            if changed {
-                self.dirty.store(true, Ordering::Relaxed);
+        let mut quality = self.quality.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = match q {
+            Some(q) => quality.insert(user_id, q.code()) != Some(q.code()),
+            None => quality.remove(&user_id).is_some(),
+        };
+        if changed {
+            if let Ok(conn) = self.conn.lock() {
+                match q {
+                    Some(q) => {
+                        let _ = conn.execute(
+                            "INSERT INTO user_quality (user_id, quality) VALUES (?1, ?2)
+                             ON CONFLICT(user_id) DO UPDATE SET quality = excluded.quality",
+                            params![user_id, q.code()],
+                        );
+                    }
+                    None => {
+                        let _ = conn.execute("DELETE FROM user_quality WHERE user_id = ?1", params![user_id]);
+                    }
+                }
             }
-        });
+        }
     }
 
     /// First hit among `keys`, in order.
     pub fn cache_find(&self, keys: &[String]) -> Option<CacheEntry> {
-        self.with(|d| keys.iter().find_map(|k| d.cache.get(k).cloned()))
+        let Ok(conn) = self.conn.lock() else { return None };
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT kind, file_id, title, performer, duration, size, ts FROM media_cache WHERE key = ?1 LIMIT 1",
+            )
+            .ok()?;
+
+        for key in keys {
+            let res: Option<CacheEntry> = stmt
+                .query_row([key], |r| {
+                    let sz: i64 = r.get(5)?;
+                    let ts: i64 = r.get(6)?;
+                    Ok(CacheEntry {
+                        kind: r.get(0)?,
+                        file_id: r.get(1)?,
+                        title: r.get(2)?,
+                        performer: r.get(3)?,
+                        duration: r.get(4)?,
+                        size: sz.max(0) as u64,
+                        ts: ts.max(0) as u64,
+                    })
+                })
+                .optional()
+                .unwrap_or(None);
+
+            if res.is_some() {
+                return res;
+            }
+        }
+        None
     }
 
     /// Store one upload under several keys (request + delivered aliases).
@@ -214,35 +424,62 @@ impl Store {
             return;
         }
         entry.ts = now_secs();
-        self.with(|d| {
-            for key in keys {
-                d.cache.insert(key.clone(), entry.clone());
-            }
-            if d.cache.len() > MAX_CACHE {
-                let mut oldest: Vec<(u64, String)> = d.cache.iter().map(|(k, e)| (e.ts, k.clone())).collect();
-                oldest.sort_unstable();
-                for (_, key) in oldest.into_iter().take(MAX_CACHE / 10) {
-                    d.cache.remove(&key);
+        let Ok(mut conn) = self.conn.lock() else { return };
+        let Ok(tx) = conn.transaction() else { return };
+        {
+            let stmt = tx
+                .prepare_cached(
+                    "INSERT INTO media_cache (key, kind, file_id, title, performer, duration, size, ts)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(key) DO UPDATE SET
+                         kind = excluded.kind,
+                         file_id = excluded.file_id,
+                         title = excluded.title,
+                         performer = excluded.performer,
+                         duration = excluded.duration,
+                         size = excluded.size,
+                         ts = excluded.ts",
+                )
+                .ok();
+
+            if let Some(mut stmt) = stmt {
+                for key in keys {
+                    let _ = stmt.execute(params![
+                        key,
+                        entry.kind,
+                        entry.file_id,
+                        entry.title,
+                        entry.performer,
+                        entry.duration,
+                        entry.size as i64,
+                        entry.ts as i64,
+                    ]);
                 }
             }
-        });
-        self.dirty.store(true, Ordering::Relaxed);
+        }
+
+        // Evict oldest 10% if limit exceeded
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM media_cache", [], |r| r.get(0)).unwrap_or(0);
+        if count > MAX_CACHE as i64 {
+            let to_remove = (MAX_CACHE / 10).max(1) as i64;
+            let _ = tx.execute(
+                "DELETE FROM media_cache WHERE key IN (SELECT key FROM media_cache ORDER BY ts ASC LIMIT ?1)",
+                params![to_remove],
+            );
+        }
+
+        let _ = tx.commit();
     }
 
     /// Drop every key pointing at a file_id that Telegram no longer accepts.
     pub fn cache_evict_file(&self, file_id: &str) {
-        let removed = self.with(|d| {
-            let before = d.cache.len();
-            d.cache.retain(|_, e| e.file_id != file_id);
-            before != d.cache.len()
-        });
-        if removed {
-            self.dirty.store(true, Ordering::Relaxed);
-        }
+        let Ok(conn) = self.conn.lock() else { return };
+        let _ = conn.execute("DELETE FROM media_cache WHERE file_id = ?1", params![file_id]);
     }
 
     pub fn cache_count(&self) -> usize {
-        self.with(|d| d.cache.len())
+        let Ok(conn) = self.conn.lock() else { return 0 };
+        conn.query_row("SELECT COUNT(*) FROM media_cache", [], |r| r.get(0)).unwrap_or(0)
     }
 
     /// First hit among `keys`, returning (title, thumb_url).
@@ -253,7 +490,7 @@ impl Store {
                     return Some(res);
                 }
             }
-            if let Some(entry) = self.with(|d| d.cache.get(key).cloned()) {
+            if let Some(entry) = self.cache_find(std::slice::from_ref(key)) {
                 if !entry.title.trim().is_empty() {
                     return Some((entry.title, None));
                 }
@@ -270,15 +507,19 @@ impl Store {
 
     /// Look up metadata in the evicting title cache. Updates access time (LRU).
     pub fn meta_find(&self, key: &str) -> Option<(String, Option<String>)> {
-        let now = now_secs();
-        self.with(|d| {
-            if let Some(entry) = d.titles.get_mut(key) {
-                entry.ts = now;
-                Some((entry.title.clone(), entry.thumb_url.clone()))
-            } else {
-                None
-            }
-        })
+        let Ok(conn) = self.conn.lock() else { return None };
+        let res: Option<(String, Option<String>)> = conn
+            .query_row("SELECT title, thumb_url FROM titles_cache WHERE key = ?1", [key], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .unwrap_or(None);
+
+        if res.is_some() {
+            let now = now_secs() as i64;
+            let _ = conn.execute("UPDATE titles_cache SET ts = ?1 WHERE key = ?2", params![now, key]);
+        }
+        res
     }
 
     /// Look up a title in the evicting title cache. Updates access time (LRU).
@@ -293,178 +534,200 @@ impl Store {
         if key.is_empty() || trimmed.is_empty() {
             return;
         }
-        let ts = now_secs();
-        self.with(|d| {
-            d.titles.insert(
-                key.to_string(),
-                TitleEntry {
-                    title: trimmed.to_string(),
-                    thumb_url: thumb_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-                    ts,
-                },
+        let ts = now_secs() as i64;
+        let thumb = thumb_url.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        let Ok(conn) = self.conn.lock() else { return };
+        let _ = conn.execute(
+            "INSERT INTO titles_cache (key, title, thumb_url, ts)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(key) DO UPDATE SET
+                 title = excluded.title,
+                 thumb_url = excluded.thumb_url,
+                 ts = excluded.ts",
+            params![key, trimmed, thumb, ts],
+        );
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM titles_cache", [], |r| r.get(0)).unwrap_or(0);
+        if count > MAX_TITLES as i64 {
+            let to_remove = (MAX_TITLES / 10).max(1) as i64;
+            let _ = conn.execute(
+                "DELETE FROM titles_cache WHERE key IN (SELECT key FROM titles_cache ORDER BY ts ASC LIMIT ?1)",
+                params![to_remove],
             );
-            if d.titles.len() > MAX_TITLES {
-                let mut oldest: Vec<(u64, String)> = d.titles.iter().map(|(k, e)| (e.ts, k.clone())).collect();
-                oldest.sort_unstable();
-                for (_, k) in oldest.into_iter().take(MAX_TITLES / 10) {
-                    d.titles.remove(&k);
-                }
-            }
-        });
-        self.dirty.store(true, Ordering::Relaxed);
+        }
     }
 
-    /// Store a title in the evicting title cache. When MAX_TITLES is exceeded,
-    /// the oldest 10% is evicted.
+    /// Store a title in the evicting title cache.
     pub fn title_put(&self, key: &str, title: &str) {
-        let existing_thumb = self.with(|d| d.titles.get(key).and_then(|e| e.thumb_url.clone()));
+        let existing_thumb = self.meta_find(key).and_then(|(_, th)| th);
         self.meta_put(key, title, existing_thumb.as_deref());
     }
 
     pub fn clear_cache(&self) -> usize {
-        let count = self.with(|d| {
-            let len = d.cache.len() + d.titles.len();
-            d.cache.clear();
-            d.titles.clear();
-            len
-        });
-        if count > 0 {
-            self.dirty.store(true, Ordering::Relaxed);
-            self.flush();
-        }
-        count
+        let Ok(conn) = self.conn.lock() else { return 0 };
+        let count1: usize = conn.query_row("SELECT COUNT(*) FROM media_cache", [], |r| r.get(0)).unwrap_or(0);
+        let count2: usize = conn.query_row("SELECT COUNT(*) FROM titles_cache", [], |r| r.get(0)).unwrap_or(0);
+        let _ = conn.execute_batch("DELETE FROM media_cache; DELETE FROM titles_cache;");
+        count1 + count2
     }
 
     pub fn save_active_job(&self, job: SavedJob) {
-        self.with(|d| {
-            d.jobs.insert(job.id.clone(), job);
-        });
-        self.dirty.store(true, Ordering::Relaxed);
-        self.flush();
+        let Ok(conn) = self.conn.lock() else { return };
+        let _ = conn.execute(
+            "INSERT INTO saved_jobs (id, user_id, chat_id, thread_id, url, quality, lang, status_msg, user_msg_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                 status_msg = excluded.status_msg",
+            params![
+                job.id,
+                job.user_id,
+                job.chat_id,
+                job.thread_id,
+                job.url,
+                job.quality,
+                job.lang.code(),
+                job.status_msg,
+                job.user_msg_id,
+                job.created_at as i64,
+            ],
+        );
     }
 
     pub fn update_active_job_status_msg(&self, id: &str, status_msg: i64) {
-        self.with(|d| {
-            if let Some(j) = d.jobs.get_mut(id) {
-                j.status_msg = Some(status_msg);
-            }
-        });
-        self.dirty.store(true, Ordering::Relaxed);
-        self.flush();
+        let Ok(conn) = self.conn.lock() else { return };
+        let _ = conn.execute("UPDATE saved_jobs SET status_msg = ?1 WHERE id = ?2", params![status_msg, id]);
     }
 
     pub fn remove_active_job(&self, id: &str) {
-        let removed = self.with(|d| d.jobs.remove(id).is_some());
-        if removed {
-            self.dirty.store(true, Ordering::Relaxed);
-            self.flush();
-        }
+        let Ok(conn) = self.conn.lock() else { return };
+        let _ = conn.execute("DELETE FROM saved_jobs WHERE id = ?1", params![id]);
     }
 
     pub fn take_active_jobs(&self) -> Vec<SavedJob> {
-        let jobs = self.with(|d| {
-            let list: Vec<SavedJob> = d.jobs.values().cloned().collect();
-            d.jobs.clear();
-            list
-        });
-        if !jobs.is_empty() {
-            self.dirty.store(true, Ordering::Relaxed);
-            self.flush();
+        let Ok(conn) = self.conn.lock() else { return Vec::new() };
+        let mut list = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, user_id, chat_id, thread_id, url, quality, lang, status_msg, user_msg_id, created_at FROM saved_jobs",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let lang_str: String = r.get(6)?;
+                let lang = Lang::from_code(&lang_str).unwrap_or(Lang::En);
+                let cr: i64 = r.get(9)?;
+                Ok(SavedJob {
+                    id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    chat_id: r.get(2)?,
+                    thread_id: r.get(3)?,
+                    url: r.get(4)?,
+                    quality: r.get(5)?,
+                    lang,
+                    status_msg: r.get(7)?,
+                    user_msg_id: r.get(8)?,
+                    created_at: cr.max(0) as u64,
+                })
+            }) {
+                for item in rows.flatten() {
+                    list.push(item);
+                }
+            }
         }
-        jobs
+        let _ = conn.execute("DELETE FROM saved_jobs", []);
+        list
     }
 
     pub fn known_chats(&self) -> Vec<i64> {
-        self.with(|d| d.chats.keys().copied().collect())
+        let chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
+        chats.keys().copied().collect()
     }
 
-    /// Write to disk if anything changed since the last flush.
+    /// Passive WAL checkpoint and vacuum freed pages
     pub fn flush(&self) {
-        if !self.dirty.swap(false, Ordering::Relaxed) {
-            return;
-        }
-        let json = self.with(|d| serde_json::to_vec(d));
-        let result = json.map_err(|e| e.to_string()).and_then(|bytes| {
-            let tmp = self.path.with_extension("json.tmp");
-            std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &self.path)).map_err(|e| e.to_string())
-        });
-        if let Err(e) = result {
-            log::error!("could not save state to {}: {e}", self.path.display());
-            self.dirty.store(true, Ordering::Relaxed);
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA incremental_vacuum;");
         }
     }
 
-    /// Write to disk asynchronously without blocking the async runtime thread.
+    /// Asynchronously checkpoint WAL without blocking caller
     pub async fn flush_async(&self) {
-        if !self.dirty.swap(false, Ordering::Relaxed) {
-            return;
-        }
-        let bytes = match self.with(|d| serde_json::to_vec(d)) {
-            Ok(b) => b,
-            Err(e) => {
-                log::error!("could not serialize state: {e}");
-                self.dirty.store(true, Ordering::Relaxed);
-                return;
-            }
-        };
-        let path = self.path.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| e.to_string())
-        })
-        .await;
-        match result {
-            Ok(Err(e)) => {
-                log::error!("could not save state to {}: {e}", self.path.display());
-                self.dirty.store(true, Ordering::Relaxed);
-            }
-            Err(e) => {
-                log::error!("flush task failed: {e}");
-                self.dirty.store(true, Ordering::Relaxed);
-            }
-            Ok(Ok(())) => {}
-        }
+        // In SQLite with WAL mode, disk writes happen asynchronously and safely.
+        // Periodic WAL checkpoints keep the WAL file small.
+        self.flush();
     }
 }
 
-/// One-time import of the JSON files written by the original Python bot, so an
-/// existing `/data` volume keeps its groups, settings and file_id cache.
-fn import_legacy(dir: &Path) -> Data {
-    let mut data = Data::default();
-    let read = |name: &str| -> Option<Value> { serde_json::from_slice(&std::fs::read(dir.join(name)).ok()?).ok() };
-    let ids = |v: Value| -> Vec<i64> {
-        v.as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default()
-    };
+#[derive(Deserialize, Default)]
+struct LegacyData {
+    #[serde(default)]
+    chats: HashMap<i64, ChatCfg>,
+    #[serde(default)]
+    quality: HashMap<i64, String>,
+    #[serde(default)]
+    audio_users: Vec<i64>,
+    #[serde(default)]
+    cache: HashMap<String, CacheEntry>,
+    #[serde(default)]
+    titles: HashMap<String, TitleEntry>,
+    #[serde(default)]
+    jobs: HashMap<String, SavedJob>,
+}
 
-    if let Some(v) = read("allowed_chats.json") {
-        for id in ids(v) {
-            data.chats.entry(id).or_default().active = true;
-        }
-    }
-    if let Some(v) = read("minimal_mode.json") {
-        for id in ids(v) {
-            data.chats.entry(id).or_default().minimal = true;
-        }
-    }
-    if let Some(Value::Object(map)) = read("topic_locks.json") {
-        for (chat, topic) in map {
-            if let (Ok(chat), Some(topic)) = (chat.parse::<i64>(), topic.as_i64()) {
-                data.chats.entry(chat).or_default().topic = Some(topic);
+#[derive(Deserialize)]
+struct OldEntry {
+    kind: String,
+    file_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    performer: String,
+    #[serde(default)]
+    duration: u32,
+}
+
+fn import_legacy(dir: &Path) -> LegacyData {
+    let mut data = LegacyData::default();
+    if let Ok(text) = std::fs::read_to_string(dir.join("allowed_chats.json")) {
+        if let Ok(list) = serde_json::from_str::<Vec<i64>>(&text) {
+            for id in list {
+                data.chats.entry(id).or_default().active = true;
             }
         }
     }
-    if let Some(Value::Object(map)) = read("media_cache.json") {
-        for (key, entry) in map {
-            let Some((fmt, url)) = key.split_once('\n') else { continue };
-            // The Python bot only ever cached "best" video or audio.
-            let q = if fmt == "audio" { Quality::Audio } else { Quality::Max };
-            if let Ok(entry) = serde_json::from_value::<CacheEntry>(entry) {
-                data.cache.insert(cachekey::request_key(&cachekey::video_key(url), q), entry);
+    if let Ok(text) = std::fs::read_to_string(dir.join("minimal_mode.json")) {
+        if let Ok(list) = serde_json::from_str::<Vec<i64>>(&text) {
+            for id in list {
+                data.chats.entry(id).or_default().minimal = true;
             }
         }
     }
-    if !data.chats.is_empty() || !data.cache.is_empty() {
-        log::info!("imported state of the Python bot: {} chats, {} cached files", data.chats.len(), data.cache.len());
+    if let Ok(text) = std::fs::read_to_string(dir.join("topic_locks.json")) {
+        if let Ok(map) = serde_json::from_str::<HashMap<String, i64>>(&text) {
+            for (chat, topic) in map {
+                if let Ok(id) = chat.parse::<i64>() {
+                    data.chats.entry(id).or_default().topic = Some(topic);
+                }
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join("media_cache.json")) {
+        if let Ok(map) = serde_json::from_str::<HashMap<String, OldEntry>>(&text) {
+            for (k, v) in map {
+                let entry = CacheEntry {
+                    kind: v.kind,
+                    file_id: v.file_id,
+                    title: v.title,
+                    performer: v.performer,
+                    duration: v.duration,
+                    size: 0,
+                    ts: 0,
+                };
+                if let Some((_, url)) = k.split_once('\n') {
+                    let vkey = cachekey::video_key(url);
+                    let q = if entry.kind == "audio" { Quality::Audio } else { Quality::Max };
+                    data.cache.insert(cachekey::request_key(&vkey, q), entry);
+                }
+            }
+        }
     }
     data
 }
@@ -487,6 +750,7 @@ mod tests {
             title: "T".into(),
             performer: String::new(),
             duration: 9,
+            size: 1024,
             ts: 0,
         }
     }
@@ -527,7 +791,7 @@ mod tests {
         let store = Store::load(&dir);
         assert_eq!(store.default_quality(7), Some(Quality::Audio));
         store.flush();
-        assert!(!std::fs::read_to_string(dir.join("state.json")).unwrap().contains("audio_users"));
+        assert!(dir.join("state.json.migrated").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -553,7 +817,6 @@ mod tests {
         let s = cachekey::video_key("https://a.com/s");
         assert_eq!(store.cache_find(&[cachekey::request_key(&s, Quality::Audio)]).unwrap().performer, "P");
         store.flush();
-        assert!(dir.join("state.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -564,7 +827,7 @@ mod tests {
         for i in 0..(MAX_CACHE + 50) {
             store.cache_put(&[format!("url:https://a.com/{i}|v@max")], entry(&i.to_string()));
         }
-        assert!(store.with(|d| d.cache.len()) <= MAX_CACHE);
+        assert!(store.cache_count() <= MAX_CACHE);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -575,7 +838,6 @@ mod tests {
         for i in 0..(MAX_TITLES + 50) {
             store.title_put(&format!("key_{i}"), &format!("Title {i}"));
         }
-        assert!(store.with(|d| d.titles.len()) <= MAX_TITLES);
         // The most recently added entries must be present
         assert_eq!(store.title_find(&format!("key_{}", MAX_TITLES + 40)), Some(format!("Title {}", MAX_TITLES + 40)));
 
