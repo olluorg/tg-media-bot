@@ -244,6 +244,17 @@ fn subscriptions_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
         ]);
     }
 
+    let close_subs_btn = match lang {
+        Lang::Ru => "✖️ Закрыть подписки",
+        Lang::Uk => "✖️ Закрити підписки",
+        Lang::Es => "✖️ Cerrar suscripciones",
+        _ => "✖️ Close subscriptions",
+    };
+    buttons.push(vec![json!({
+        "text": close_subs_btn,
+        "callback_data": "del"
+    })]);
+
     (header, json!({ "inline_keyboard": buttons }))
 }
 
@@ -442,10 +453,7 @@ fn render_card_markup(
             json!({ "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) }),
             json!({ "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.id) }),
         ],
-        vec![
-            json!({ "text": comm_btn, "callback_data": format!("comm:{}:0", item.id) }),
-            json!({ "text": "✖️", "callback_data": "del" }),
-        ],
+        vec![json!({ "text": comm_btn, "callback_data": format!("comm:{}:0", item.id) })],
     ];
 
     if let Some((page, total_pages, prefix, token)) = page_nav {
@@ -459,6 +467,19 @@ fn render_card_markup(
                 json!({ "text": "▶️", "callback_data": format!("{prefix}:p:{next_page}:{token}") }),
             ]);
         }
+
+        let close_btn = match (lang, prefix) {
+            (Lang::Ru, "s") => "✖️ Закрыть поиск",
+            (Lang::Ru, _) => "✖️ Закрыть видео",
+            (Lang::Uk, "s") => "✖️ Закрити пошук",
+            (Lang::Uk, _) => "✖️ Закрити відео",
+            (Lang::Es, "s") => "✖️ Cerrar búsqueda",
+            (Lang::Es, _) => "✖️ Cerrar videos",
+            (_, "s") => "✖️ Close search",
+            (_, _) => "✖️ Close videos",
+        };
+
+        rows.push(vec![json!({ "text": close_btn, "callback_data": format!("{prefix}:close:{token}") })]);
     }
 
     json!({ "inline_keyboard": rows })
@@ -1799,6 +1820,16 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                                 .edit_message_media(chat_id, mid, "photo", &thumb_url, &caption, Some(markup))
                                 .await;
                         }
+                    }
+                }
+                ["close", token] => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    if let Some(session) = get_card_session(token) {
+                        for mid in session.msg_ids {
+                            let _ = app.bot.delete_message(msg.chat.id, mid).await;
+                        }
+                    } else {
+                        let _ = app.bot.delete_message(msg.chat.id, msg.message_id).await;
                     }
                 }
                 _ => {
