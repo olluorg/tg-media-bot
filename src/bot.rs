@@ -417,53 +417,57 @@ async fn handle_search_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, args: &
     let sent = app.bot.send_message(chat, thread, &searching_text, None, Some(msg.message_id)).await;
     let status_msg_id = sent.ok().map(|m| m.message_id);
 
-    let results = crate::search::search_youtube(&app.cfg, &app.search_slots, query, 5).await;
+    let results = crate::search::search_youtube(&app.cfg, &app.search_slots, query, 3).await;
 
     match results {
         Ok(items) if !items.is_empty() => {
-            let title_header = match lang {
-                Lang::Ru => format!("🔍 <b>Результаты поиска «{}»:</b>\n", util::html_escape(query)),
-                Lang::Uk => format!("🔍 <b>Результати пошуку «{}»:</b>\n", util::html_escape(query)),
-                Lang::Es => format!("🔍 <b>Resultados de búsqueda «{}»:</b>\n", util::html_escape(query)),
-                _ => format!("🔍 <b>Search results for «{}»:</b>\n", util::html_escape(query)),
-            };
-
-            let num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
-            let mut lines = vec![title_header];
-            let mut keyboard_rows = Vec::new();
-
-            for (i, item) in items.iter().enumerate() {
-                let emoji = num_emojis.get(i).copied().unwrap_or("▶️");
-                let dur =
-                    if !item.duration_str.is_empty() { format!(" ({})", item.duration_str) } else { String::new() };
-
-                lines.push(format!(
-                    "{emoji} <a href=\"{}\"><b>{}</b></a>{dur}\n👤 <i>{}</i>\n",
-                    item.url,
-                    util::html_escape(&item.title),
-                    util::html_escape(&item.uploader)
-                ));
-
-                let (dl_video_btn, dl_audio_btn) = match lang {
-                    Lang::Ru => (format!("{emoji} 🎬 Скачать"), format!("{emoji} 🎵 MP3")),
-                    Lang::Uk => (format!("{emoji} 🎬 Завантажити"), format!("{emoji} 🎵 MP3")),
-                    Lang::Es => (format!("{emoji} 🎬 Descargar"), format!("{emoji} 🎵 MP3")),
-                    _ => (format!("{emoji} 🎬 Download"), format!("{emoji} 🎵 MP3")),
-                };
-
-                keyboard_rows.push(vec![
-                    json!({ "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) }),
-                    json!({ "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.id) }),
-                ]);
+            if let Some(msg_id) = status_msg_id {
+                let _ = app.bot.delete_message(chat, msg_id).await;
             }
 
-            let text = lines.join("\n");
-            let markup = json!({ "inline_keyboard": keyboard_rows });
+            let (dl_video_btn, dl_audio_btn, comm_btn) = match lang {
+                Lang::Ru => ("🎬 Скачать", "🎵 MP3", "💬 Комментарии"),
+                Lang::Uk => ("🎬 Завантажити", "🎵 MP3", "💬 Коментарі"),
+                Lang::Es => ("🎬 Descargar", "🎵 MP3", "💬 Comentarios"),
+                _ => ("🎬 Download", "🎵 MP3", "💬 Comments"),
+            };
 
-            if let Some(msg_id) = status_msg_id {
-                let _ = app.bot.edit_message(chat, msg_id, &text, Some(markup)).await;
-            } else {
-                let _ = app.bot.send_message(chat, thread, &text, Some(markup), Some(msg.message_id)).await;
+            for item in items {
+                let dur = if !item.duration_str.is_empty() {
+                    format!(" • ⏱ <b>{}</b>", item.duration_str)
+                } else {
+                    String::new()
+                };
+
+                let caption = format!(
+                    "🎬 <a href=\"{}\"><b>{}</b></a>\n👤 <i>{}</i>{}\n",
+                    item.url,
+                    util::html_escape(&item.title),
+                    util::html_escape(&item.uploader),
+                    dur
+                );
+
+                let markup = json!({
+                    "inline_keyboard": [
+                        [
+                            { "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) },
+                            { "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.id) }
+                        ],
+                        [
+                            { "text": comm_btn, "callback_data": format!("comm:{}:0", item.id) },
+                            { "text": "✖️", "callback_data": "del" }
+                        ]
+                    ]
+                });
+
+                let thumb_url = item
+                    .thumb_url
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", item.id));
+
+                if app.bot.send_photo(chat, thread, &thumb_url, &caption, Some(markup.clone()), None).await.is_err() {
+                    let _ = app.bot.send_message(chat, thread, &caption, Some(markup), None).await;
+                }
             }
         }
         Ok(_) => {
