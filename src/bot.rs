@@ -38,6 +38,158 @@ pub fn command_list(t: &Strings) -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+pub fn main_menu_keyboard(lang: Lang) -> Value {
+    let (btn_search, btn_subs, btn_prem, btn_settings) = match lang {
+        Lang::Ru => ("🔍 Поиск", "📺 Мои подписки", "⭐ Premium", "⚙️ Настройки"),
+        Lang::Uk => ("🔍 Пошук", "📺 Мої підписки", "⭐ Premium", "⚙️ Налаштування"),
+        Lang::Es => ("🔍 Buscar", "📺 Mis suscripciones", "⭐ Premium", "⚙️ Ajustes"),
+        _ => ("🔍 Search", "📺 Subscriptions", "⭐ Premium", "⚙️ Settings"),
+    };
+    json!({
+        "keyboard": [
+            [{ "text": btn_search }, { "text": btn_subs }],
+            [{ "text": btn_prem }, { "text": btn_settings }]
+        ],
+        "resize_keyboard": true,
+        "is_persistent": true
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MenuAction {
+    Search,
+    Subscriptions,
+    Premium,
+    Settings,
+}
+
+fn parse_menu_action(text: &str) -> Option<MenuAction> {
+    let t = text.trim();
+    if t.starts_with("🔍")
+        || t.eq_ignore_ascii_case("поиск")
+        || t.eq_ignore_ascii_case("search")
+        || t.eq_ignore_ascii_case("buscar")
+        || t.eq_ignore_ascii_case("пошук")
+    {
+        Some(MenuAction::Search)
+    } else if t.starts_with("📺")
+        || t.contains("подписк")
+        || t.contains("підписк")
+        || t.contains("suscrip")
+        || t.contains("subscri")
+    {
+        Some(MenuAction::Subscriptions)
+    } else if t.starts_with("⭐") || t.eq_ignore_ascii_case("premium") {
+        Some(MenuAction::Premium)
+    } else if t.starts_with("⚙")
+        || t.contains("настройк")
+        || t.contains("налаштув")
+        || t.contains("ajuste")
+        || t.contains("setting")
+    {
+        Some(MenuAction::Settings)
+    } else {
+        None
+    }
+}
+
+fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, Value) {
+    let t = lang.t();
+    let cur_q = quality_name(t, app.store.default_quality(user_id));
+    let minimal = app.store.minimal(chat_id);
+    let stats = app.stats.get_user_stats(user_id);
+    let size_fmt = crate::util::fmt_size(stats.total_bytes);
+
+    let (text, min_label, btn_q, btn_lang, btn_stats, btn_clear) = match lang {
+        Lang::Ru => (
+            format!(
+                "⚙️ <b>Настройки бота</b>\n\n\
+                 • 🎚 Качество по умолчанию: <b>{cur_q}</b>\n\
+                 • 🌐 Язык интерфейса: <b>{}</b>\n\
+                 • 🤫 Минимальный режим: <b>{}</b>\n\
+                 • 📊 Скачано вами: <b>{} видео</b> ({size_fmt})",
+                lang.button(),
+                if minimal { "включён" } else { "выключен" },
+                stats.total_downloads
+            ),
+            if minimal { "🤫 Режим: Минимальный (вкл)" } else { "🤫 Режим: Обычный (выкл)" },
+            "🎚 Качество",
+            "🌐 Язык",
+            "📊 Моя статистика",
+            "🧹 Очистить чат",
+        ),
+        Lang::Uk => (
+            format!(
+                "⚙️ <b>Налаштування бота</b>\n\n\
+                 • 🎚 Якість за замовчуванням: <b>{cur_q}</b>\n\
+                 • 🌐 Мова інтерфейсу: <b>{}</b>\n\
+                 • 🤫 Мінімальний режим: <b>{}</b>\n\
+                 • 📊 Завантажено вами: <b>{} відео</b> ({size_fmt})",
+                lang.button(),
+                if minimal { "увімкнено" } else { "вимкнено" },
+                stats.total_downloads
+            ),
+            if minimal { "🤫 Режим: Мінімальний (увімк)" } else { "🤫 Режим: Звичайний (вимк)" },
+            "🎚 Якість",
+            "🌐 Мова",
+            "📊 Моя статистика",
+            "🧹 Очистити чат",
+        ),
+        Lang::Es => (
+            format!(
+                "⚙️ <b>Ajustes del bot</b>\n\n\
+                 • 🎚 Calidad predeterminada: <b>{cur_q}</b>\n\
+                 • 🌐 Idioma: <b>{}</b>\n\
+                 • 🤫 Modo mínimo: <b>{}</b>\n\
+                 • 📊 Descargas: <b>{} videos</b> ({size_fmt})",
+                lang.button(),
+                if minimal { "activado" } else { "desactivado" },
+                stats.total_downloads
+            ),
+            if minimal { "🤫 Modo: Mínimo (on)" } else { "🤫 Modo: Normal (off)" },
+            "🎚 Calidad",
+            "🌐 Idioma",
+            "📊 Mis estadísticas",
+            "🧹 Limpiar chat",
+        ),
+        _ => (
+            format!(
+                "⚙️ <b>Bot Settings</b>\n\n\
+                 • 🎚 Default quality: <b>{cur_q}</b>\n\
+                 • 🌐 Interface language: <b>{}</b>\n\
+                 • 🤫 Minimal mode: <b>{}</b>\n\
+                 • 📊 Your downloads: <b>{} videos</b> ({size_fmt})",
+                lang.button(),
+                if minimal { "enabled" } else { "disabled" },
+                stats.total_downloads
+            ),
+            if minimal { "🤫 Mode: Minimal (on)" } else { "🤫 Mode: Normal (off)" },
+            "🎚 Quality",
+            "🌐 Language",
+            "📊 My Stats",
+            "🧹 Clear Chat",
+        ),
+    };
+
+    let kb = json!({
+        "inline_keyboard": [
+            [
+                { "text": btn_q, "callback_data": "cfg:q" },
+                { "text": btn_lang, "callback_data": "cfg:lang" }
+            ],
+            [
+                { "text": min_label, "callback_data": "cfg:min" }
+            ],
+            [
+                { "text": btn_stats, "callback_data": "cfg:me" },
+                { "text": btn_clear, "callback_data": "cfg:clear" }
+            ]
+        ]
+    });
+
+    (text, kb)
+}
+
 fn lang_keyboard() -> Value {
     let buttons: Vec<Value> =
         Lang::ALL.iter().map(|l| json!({ "text": l.button(), "callback_data": format!("l:{}", l.code()) })).collect();
@@ -375,6 +527,70 @@ fn subscriptions_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
     })]);
 
     (header, json!({ "inline_keyboard": buttons }))
+}
+
+async fn handle_menu_action(app: &Arc<App>, _msg: &Message, ctx: &Ctx, action: MenuAction) {
+    let (chat, thread) = (ctx.chat, ctx.thread);
+    match action {
+        MenuAction::Search => {
+            let is_premium = app.store.is_user_premium(ctx.user);
+            if is_premium {
+                let (prompt, btn_text) = match ctx.lang {
+                    Lang::Ru => (
+                        "🔍 <b>Поиск видео на YouTube</b>\n\n\
+                         • Отправьте поисковый запрос текстом прямо в чат (например: <code>Queen</code>)\n\
+                         • Либо нажмите кнопку ниже для быстрого inline-поиска:",
+                        "🔎 Искать в этом чате",
+                    ),
+                    Lang::Uk => (
+                        "🔍 <b>Пошук відео на YouTube</b>\n\n\
+                         • Надішліть пошуковий запит текстом у чат (наприклад: <code>Queen</code>)\n\
+                         • Або натисніть кнопку нижче для швидкого inline-пошуку:",
+                        "🔎 Шукати в цьому чаті",
+                    ),
+                    Lang::Es => (
+                        "🔍 <b>Buscar videos en YouTube</b>\n\n\
+                         • Envía tu búsqueda por texto a este chat (ejemplo: <code>Queen</code>)\n\
+                         • O pulsa el botón de abajo para búsqueda inline:",
+                        "🔎 Buscar en este chat",
+                    ),
+                    _ => (
+                        "🔍 <b>YouTube Video Search</b>\n\n\
+                         • Send your search query directly into this chat (e.g. <code>Queen</code>)\n\
+                         • Or click the button below for inline search:",
+                        "🔎 Search in this chat",
+                    ),
+                };
+                let kb = json!({
+                    "inline_keyboard": [
+                        [{ "text": btn_text, "switch_inline_query_current_chat": "" }]
+                    ]
+                });
+                app.say(chat, thread, prompt, Some(kb)).await;
+            } else {
+                let prompt = match ctx.lang {
+                    Lang::Ru => "⭐ <b>Поиск видео по YouTube доступен с Premium</b>\n\nС Premium вы можете искать и сразу скачивать любые ролики прямо в Telegram!",
+                    Lang::Uk => "⭐ <b>Пошук відео на YouTube доступний з Premium</b>\n\nЗ Premium ви можете шукати та завантажувати ролики прямо в Telegram!",
+                    Lang::Es => "⭐ <b>La búsqueda de videos en YouTube está disponible con Premium</b>",
+                    _ => "⭐ <b>YouTube Video Search is available with Premium</b>",
+                };
+                let kb = premium_upsell_keyboard(app, ctx.user, ctx.lang);
+                app.say(chat, thread, prompt, Some(kb)).await;
+            }
+        }
+        MenuAction::Subscriptions => {
+            let (text, kb) = subscriptions_menu(app, ctx.user, ctx.lang);
+            app.say(chat, thread, &text, Some(kb)).await;
+        }
+        MenuAction::Premium => {
+            let (text, kb) = premium_menu(app, ctx.user, ctx.lang);
+            app.say(chat, thread, &text, Some(kb)).await;
+        }
+        MenuAction::Settings => {
+            let (text, kb) = settings_menu(app, ctx.user, ctx.chat, ctx.lang);
+            app.say(chat, thread, &text, Some(kb)).await;
+        }
+    }
 }
 
 async fn handle_channel_subscription_request(app: &Arc<App>, ctx: &Ctx, url: &str, reply_to: Option<i64>) {
@@ -1144,6 +1360,13 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
         return;
     }
 
+    if !msg.chat.is_group() {
+        if let Some(action) = parse_menu_action(&text) {
+            handle_menu_action(app, &msg, &ctx, action).await;
+            return;
+        }
+    }
+
     let urls = urls_of(&msg, &text);
     if urls.is_empty() {
         let addressed = !msg.chat.is_group()
@@ -1207,7 +1430,16 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                     }
                 }
             }
-            app.say(chat, thread, &format!("{}\n\n{LANG_PROMPT}", t.welcome), Some(lang_keyboard())).await
+            app.say(chat, thread, &format!("{}\n\n{LANG_PROMPT}", t.welcome), Some(lang_keyboard())).await;
+            if !msg.chat.is_group() {
+                let menu_hint = match ctx.lang {
+                    Lang::Ru => "👇 Используйте меню снизу для быстрого доступа к функциям:",
+                    Lang::Uk => "👇 Використовуйте меню знизу для швидкого доступу до функцій:",
+                    Lang::Es => "👇 Usa el menú de abajo para acceder rápidamente a las funciones:",
+                    _ => "👇 Use the menu below for quick navigation:",
+                };
+                let _ = app.bot.send_message(chat, thread, menu_hint, Some(main_menu_keyboard(ctx.lang)), None).await;
+            }
         }
         "help" => {
             let mut limits = fill(
@@ -1511,6 +1743,10 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 let state = if app.store.minimal(chat) { t.word_on } else { t.word_off };
                 app.say(chat, thread, &fill(t.minimal_status, &[("state", state)]), None).await;
             }
+        },
+        "settings" | "menu" => {
+            let (text, kb) = settings_menu(app, ctx.user, ctx.chat, ctx.lang);
+            app.say(chat, thread, &text, Some(kb)).await;
         },
         "topic" => {
             if !msg.chat.is_group() {
@@ -1835,7 +2071,16 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
             app.store.set_lang(msg.chat.id, new);
             app.bot.answer_callback(&cb.id, Some(new.button()), false).await;
             let text = fill(new.t().lang_set, &[("lang", new.button())]);
-            if let Err(e) = app.bot.edit_message(msg.chat.id, msg.message_id, &text, None).await {
+            let back_btn = match new {
+                Lang::Ru => "« Назад в настройки",
+                Lang::Uk => "« Назад до налаштувань",
+                Lang::Es => "« Volver a ajustes",
+                _ => "« Back to settings",
+            };
+            let kb = json!({
+                "inline_keyboard": [[{ "text": back_btn, "callback_data": "cfg:back" }]]
+            });
+            if let Err(e) = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await {
                 log::debug!("edit after language change failed: {e}");
             }
             // Private chats also get the command menu in the chosen language.
@@ -1844,6 +2089,13 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 if let Err(e) = app.bot.set_commands(&commands, None, Some(msg.chat.id)).await {
                     log::debug!("setMyCommands for chat failed: {e}");
                 }
+                let updated_menu_hint = match new {
+                    Lang::Ru => "✨ Меню обновлено на русском языке",
+                    Lang::Uk => "✨ Меню оновлено українською мовою",
+                    Lang::Es => "✨ Menú actualizado en español",
+                    _ => "✨ Menu updated in English",
+                };
+                let _ = app.bot.send_message(msg.chat.id, msg.thread(), updated_menu_hint, Some(main_menu_keyboard(new)), None).await;
             }
         }
         // Answer to "which quality?".
@@ -1878,7 +2130,16 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
             app.store.set_default_quality(cb.from.id, choice);
             app.bot.answer_callback(&cb.id, None, false).await;
             let text = fill(t.quality_set, &[("q", &quality_name(t, choice))]);
-            if let Err(e) = app.bot.edit_message(msg.chat.id, msg.message_id, &text, None).await {
+            let back_btn = match lang {
+                Lang::Ru => "« Назад в настройки",
+                Lang::Uk => "« Назад до налаштувань",
+                Lang::Es => "« Volver a ajustes",
+                _ => "« Back to settings",
+            };
+            let kb = json!({
+                "inline_keyboard": [[{ "text": back_btn, "callback_data": "cfg:back" }]]
+            });
+            if let Err(e) = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await {
                 log::debug!("edit after quality change failed: {e}");
             }
         }
@@ -2359,6 +2620,109 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 }
             });
         }
+        "cfg" => {
+            let back_btn = match lang {
+                Lang::Ru => "« Назад в настройки",
+                Lang::Uk => "« Назад до налаштувань",
+                Lang::Es => "« Volver a ajustes",
+                _ => "« Back to settings",
+            };
+            match rest {
+                "q" => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    let cur_q = quality_name(t, app.store.default_quality(cb.from.id));
+                    let title = match lang {
+                        Lang::Ru => format!("🎚 <b>Выберите качество по умолчанию</b>\nТекущее: <b>{cur_q}</b>"),
+                        Lang::Uk => format!("🎚 <b>Оберіть якість за замовчуванням</b>\nПоточна: <b>{cur_q}</b>"),
+                        Lang::Es => format!("🎚 <b>Selecciona la calidad predeterminada</b>\nActual: <b>{cur_q}</b>"),
+                        _ => format!("🎚 <b>Select default quality</b>\nCurrent: <b>{cur_q}</b>"),
+                    };
+                    let mut rows = quality_rows(t, app.cfg.max_height, |code| format!("d:{code}"));
+                    rows.push(vec![json!({ "text": t.btn_ask, "callback_data": "d:ask" })]);
+                    rows.push(vec![json!({ "text": back_btn, "callback_data": "cfg:back" })]);
+                    let kb = json!({ "inline_keyboard": rows });
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &title, Some(kb)).await;
+                }
+                "lang" => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    let title = match lang {
+                        Lang::Ru => "🌐 <b>Выберите язык интерфейса</b>",
+                        Lang::Uk => "🌐 <b>Оберіть мову інтерфейсу</b>",
+                        Lang::Es => "🌐 <b>Selecciona el idioma</b>",
+                        _ => "🌐 <b>Select interface language</b>",
+                    };
+                    let mut rows: Vec<Vec<Value>> = Lang::ALL
+                        .chunks(2)
+                        .map(|chunk| {
+                            chunk
+                                .iter()
+                                .map(|l| json!({ "text": l.button(), "callback_data": format!("l:{}", l.code()) }))
+                                .collect()
+                        })
+                        .collect();
+                    rows.push(vec![json!({ "text": back_btn, "callback_data": "cfg:back" })]);
+                    let kb = json!({ "inline_keyboard": rows });
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, title, Some(kb)).await;
+                }
+                "min" => {
+                    let cur = app.store.minimal(msg.chat.id);
+                    app.store.set_minimal(msg.chat.id, !cur);
+                    let alert = match (lang, !cur) {
+                        (Lang::Ru, true) => "🤫 Минимальный режим включён",
+                        (Lang::Ru, false) => "🤫 Минимальный режим выключен",
+                        (Lang::Uk, true) => "🤫 Мінімальний режим увімкнено",
+                        (Lang::Uk, false) => "🤫 Мінімальний режим вимкнено",
+                        (Lang::Es, true) => "🤫 Modo mínimo activado",
+                        (Lang::Es, false) => "🤫 Modo mínimo desactivado",
+                        (_, true) => "🤫 Minimal mode enabled",
+                        (_, false) => "🤫 Minimal mode disabled",
+                    };
+                    app.bot.answer_callback(&cb.id, Some(alert), false).await;
+                    let (text, kb) = settings_menu(app, cb.from.id, msg.chat.id, lang);
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+                }
+                "me" => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    let text = app.stats.render_user_stats(cb.from.id);
+                    let kb = json!({
+                        "inline_keyboard": [[{ "text": back_btn, "callback_data": "cfg:back" }]]
+                    });
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+                }
+                "clear" => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    let mut current_id = msg.message_id;
+                    let mut remaining = 100;
+                    while remaining > 0 && current_id > 0 {
+                        let batch_size = remaining.min(100);
+                        let start_id = current_id.saturating_sub(batch_size as i64 - 1).max(1);
+                        let ids: Vec<i64> = (start_id..=current_id).rev().collect();
+                        if ids.is_empty() {
+                            break;
+                        }
+                        let _ = app.bot.delete_messages(msg.chat.id, &ids).await;
+                        if start_id <= 1 {
+                            break;
+                        }
+                        current_id = start_id - 1;
+                        remaining -= ids.len();
+                    }
+                    if let Ok(confirm_msg) = app.bot.send_message(msg.chat.id, msg.thread(), t.cleared, None, None).await {
+                        let bot = app.bot.clone();
+                        let chat_id = msg.chat.id;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            let _ = bot.delete_message(chat_id, confirm_msg.message_id).await;
+                        });
+                    }
+                }
+                "back" | _ => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    let (text, kb) = settings_menu(app, cb.from.id, msg.chat.id, lang);
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+                }
+            }
+        }
         "del" => {
             app.bot.answer_callback(&cb.id, None, false).await;
             let _ = app.bot.delete_message(msg.chat.id, msg.message_id).await;
@@ -2799,5 +3163,21 @@ mod tests {
         assert_eq!(stashed_urls, vec!["https://youtu.be/test12345"]);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_menu_actions() {
+        assert_eq!(parse_menu_action("🔍 Поиск"), Some(MenuAction::Search));
+        assert_eq!(parse_menu_action("search"), Some(MenuAction::Search));
+        assert_eq!(parse_menu_action("🔍 Buscar"), Some(MenuAction::Search));
+        assert_eq!(parse_menu_action("📺 Мои подписки"), Some(MenuAction::Subscriptions));
+        assert_eq!(parse_menu_action("📺 Mis suscripciones"), Some(MenuAction::Subscriptions));
+        assert_eq!(parse_menu_action("⭐ Premium"), Some(MenuAction::Premium));
+        assert_eq!(parse_menu_action("⚙️ Настройки"), Some(MenuAction::Settings));
+        assert_eq!(parse_menu_action("⚙️ Ajustes"), Some(MenuAction::Settings));
+        assert_eq!(parse_menu_action("some random text"), None);
+
+        let ru_kb = main_menu_keyboard(Lang::Ru);
+        assert_eq!(ru_kb["keyboard"].as_array().unwrap().len(), 2);
     }
 }
