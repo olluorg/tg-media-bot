@@ -215,6 +215,7 @@ pub struct Media<'a> {
     pub title: Option<&'a str>,
     pub performer: Option<&'a str>,
     pub thumb: Option<&'a Path>,
+    pub markup: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -512,6 +513,9 @@ impl Bot {
         }
         if let Some(c) = m.caption {
             form = form.text("caption", c.to_string()).text("parse_mode", "HTML");
+        }
+        if let Some(ref markup) = m.markup {
+            form = form.text("reply_markup", markup.to_string());
         }
         if let Some(d) = m.duration.filter(|_| m.kind != MediaKind::Document) {
             form = form.text("duration", d.to_string());

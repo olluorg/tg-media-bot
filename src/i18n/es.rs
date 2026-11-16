@@ -105,6 +105,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud y más 
 
     c_start: "Iniciar el bot",
     c_help: "Ayuda y sitios compatibles",
+    c_search: "Buscar videos (Premium)",
     c_quality: "Calidad por defecto",
     c_status: "Tu cola",
     c_mystats: "Mi estadística",

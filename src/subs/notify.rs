@@ -87,6 +87,13 @@ fn format_notification_card(notif: &NewVideoNotification, video_url: &str, lang:
         util::html_escape(&notif.video_title)
     );
 
+    let comm_btn = match lang {
+        crate::i18n::Lang::Ru => "💬 Комментарии",
+        crate::i18n::Lang::Uk => "💬 Коментарі",
+        crate::i18n::Lang::Es => "💬 Comentarios",
+        _ => "💬 Comments",
+    };
+
     let kb = json!({
         "inline_keyboard": [
             [
@@ -97,6 +104,7 @@ fn format_notification_card(notif: &NewVideoNotification, video_url: &str, lang:
                 { "text": dl_audio_btn, "callback_data": format!("sub:dl:a:{}", notif.video_id) }
             ],
             [
+                { "text": comm_btn, "callback_data": format!("comm:{}:0", notif.video_id) },
                 { "text": unsub_btn, "callback_data": format!("sub:unsub:{}", notif.channel_id) }
             ]
         ]

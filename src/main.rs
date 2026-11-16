@@ -7,6 +7,7 @@
 mod app;
 mod bot;
 mod cachekey;
+mod comments;
 mod config;
 mod i18n;
 mod logger;
@@ -14,6 +15,7 @@ mod media;
 mod meta;
 mod plugins;
 mod proc;
+mod search;
 mod state;
 mod stats;
 mod subs;

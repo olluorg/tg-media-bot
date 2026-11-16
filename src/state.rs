@@ -455,6 +455,42 @@ impl Store {
         None
     }
 
+    /// Search cached media by title or performer.
+    pub fn cache_search(&self, query: &str, limit: usize) -> Vec<CacheEntry> {
+        let Ok(conn) = self.conn.lock() else { return Vec::new() };
+        let pattern = format!("%{}%", query.trim());
+        let mut stmt = match conn.prepare_cached(
+            "SELECT kind, file_id, title, performer, duration, size, ts
+             FROM media_cache
+             WHERE title LIKE ?1 OR performer LIKE ?1
+             GROUP BY file_id
+             ORDER BY ts DESC
+             LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = stmt.query_map(params![pattern, limit as i64], |r| {
+            let sz: i64 = r.get(5)?;
+            let ts: i64 = r.get(6)?;
+            Ok(CacheEntry {
+                kind: r.get(0)?,
+                file_id: r.get(1)?,
+                title: r.get(2)?,
+                performer: r.get(3)?,
+                duration: r.get(4)?,
+                size: sz.max(0) as u64,
+                ts: ts.max(0) as u64,
+            })
+        });
+
+        match rows {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Store one upload under several keys (request + delivered aliases).
     pub fn cache_put(&self, keys: &[String], mut entry: CacheEntry) {
         if keys.is_empty() {
@@ -1193,6 +1229,50 @@ mod tests {
         assert!(store.get_next_channel_for_rss(now.saturating_sub(600)).is_none());
         assert!(store.get_next_channel_for_rss(now + 1).is_some());
         assert!(store.get_oldest_channel_check_time().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_search_by_title_and_performer() {
+        let dir = temp_dir("cache-search");
+        let store = Store::load(&dir);
+
+        let e1 = CacheEntry {
+            kind: "video".into(),
+            file_id: "file_vid_1".into(),
+            title: "Rust Language Tutorial for Beginners".into(),
+            performer: "Ferris".into(),
+            duration: 120,
+            size: 1024,
+            ts: 100,
+        };
+        let e2 = CacheEntry {
+            kind: "audio".into(),
+            file_id: "file_aud_1".into(),
+            title: "Bohemian Rhapsody".into(),
+            performer: "Queen".into(),
+            duration: 354,
+            size: 2048,
+            ts: 200,
+        };
+
+        store.cache_put(&["key1".into()], e1);
+        store.cache_put(&["key2".into()], e2);
+
+        // Search by title substring (case-insensitive)
+        let res1 = store.cache_search("tutorial", 5);
+        assert_eq!(res1.len(), 1);
+        assert_eq!(res1[0].file_id, "file_vid_1");
+
+        // Search by performer
+        let res2 = store.cache_search("Queen", 5);
+        assert_eq!(res2.len(), 1);
+        assert_eq!(res2[0].file_id, "file_aud_1");
+
+        // Search non-existent
+        let res3 = store.cache_search("nonexistent query", 5);
+        assert!(res3.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -23,6 +23,7 @@ pub fn command_list(t: &Strings) -> Vec<(&'static str, &'static str)> {
     vec![
         ("start", t.c_start),
         ("help", t.c_help),
+        ("search", t.c_search),
         ("premium", t.c_premium),
         ("subscriptions", t.c_subscriptions),
         ("quality", t.c_quality),
@@ -116,8 +117,9 @@ fn premium_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
                 (
                     format!(
                         "✨ <b>Ваш статус: Premium активен</b>\n\n\
+                         🔍 Поиск видео: <b>активен</b> (/search или текст в чате)\n\
                          📺 Отслеживание каналов: <b>{sub_count}/{limit}</b>\n\
-                         Бот автоматически присылает новые видео с ваших подписок с кнопками быстрого скачивания.",
+                         Бот присылает новые видео с подписок и позволяет искать любые видео на YouTube.",
                     ),
                     "Отключить Premium",
                     "pr:off",
@@ -126,10 +128,12 @@ fn premium_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
                 (
                     format!(
                         "⭐ <b>Подписка Premium</b>\n\n\
-                         С Premium вы можете подписаться на любые YouTube-каналы и первыми получать новые видео прямо в Telegram!\n\n\
-                         • Лимит: до {limit} каналов\n\
-                         • Мгновенные уведомления о новых видео\n\
-                         • Скачивание видео/аудио в 1 клик\n\n\
+                         С Premium вам доступны эксклюзивные функции:\n\
+                         • 🔍 <b>Поиск видео по названию</b> через /search и в инлайн-режиме\n\
+                         • 💬 <b>Топ-комментарии к видео</b> с удобной пагинацией\n\
+                         • 📺 <b>Отслеживание YouTube-каналов</b> (до {limit} каналов)\n\
+                         • ⚡ <b>Мгновенные уведомления</b> о новых видео\n\
+                         • 📥 <b>Скачивание видео и MP3</b> в 1 клик\n\n\
                          <i>Пока идет тестирование, Premium можно активировать бесплатно:</i>",
                     ),
                     "✨ Активировать тестовый Premium",
@@ -142,8 +146,9 @@ fn premium_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
                 (
                     format!(
                         "✨ <b>Your status: Premium Active</b>\n\n\
+                         🔍 Video search: <b>active</b> (/search or text in chat)\n\
                          📺 Tracked channels: <b>{sub_count}/{limit}</b>\n\
-                         The bot automatically sends new videos from your subscriptions with 1-click download buttons.",
+                         The bot sends new releases and lets you search any videos on YouTube.",
                     ),
                     "Disable Premium",
                     "pr:off",
@@ -152,10 +157,12 @@ fn premium_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
                 (
                     format!(
                         "⭐ <b>Premium Subscription</b>\n\n\
-                         With Premium you can subscribe to YouTube channels and receive new releases directly in Telegram!\n\n\
-                         • Limit: up to {limit} channels\n\
-                         • Instant notifications on new uploads\n\
-                         • 1-click video/audio downloads\n\n\
+                         With Premium you unlock exclusive features:\n\
+                         • 🔍 <b>Search videos by title</b> via /search and inline mode\n\
+                         • 💬 <b>Top video comments</b> with pagination\n\
+                         • 📺 <b>Track YouTube channels</b> (up to {limit} channels)\n\
+                         • ⚡ <b>Instant notifications</b> on new releases\n\
+                         • 📥 <b>1-click video and MP3 downloads</b>\n\n\
                          <i>During testing, you can activate Premium for free:</i>",
                     ),
                     "✨ Activate Test Premium",
@@ -347,6 +354,148 @@ async fn handle_channel_subscription_request(app: &Arc<App>, ctx: &Ctx, url: &st
     }
 }
 
+async fn handle_search_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, args: &str) {
+    let user_id = ctx.user;
+    let (chat, thread) = (ctx.chat, ctx.thread);
+    let lang = ctx.lang;
+    let query = args.trim();
+
+    // 1. Check if user is premium
+    if !app.store.is_user_premium(user_id) {
+        let (prompt, btn) = match lang {
+            Lang::Ru => (
+                "⭐ <b>Поиск по видео доступен только с Premium</b>\n\n\
+                 С Premium вы можете искать любые видео по названию прямо в Telegram и скачивать их в 1 клик.\n\n\
+                 <i>Пока идет тестирование, Premium можно активировать бесплатно:</i>",
+                "✨ Активировать тестовый Premium",
+            ),
+            Lang::Uk => (
+                "⭐ <b>Пошук відео доступний лише з Premium</b>\n\n\
+                 З Premium ви можете шукати будь-які відео за назвою прямо в Telegram та завантажувати їх в 1 клік.\n\n\
+                 <i>Поки триває тестування, Premium можна активувати безкоштовно:</i>",
+                "✨ Активувати тестовий Premium",
+            ),
+            Lang::Es => (
+                "⭐ <b>La búsqueda de videos solo está disponible con Premium</b>\n\n\
+                 Con Premium puedes buscar videos por título directamente en Telegram y descargarlos en 1 clic.\n\n\
+                 <i>Durante las pruebas, puedes activar Premium gratis:</i>",
+                "✨ Activar Premium de prueba",
+            ),
+            _ => (
+                "⭐ <b>Video search is only available with Premium</b>\n\n\
+                 With Premium you can search any video by title directly in Telegram and download with 1 click.\n\n\
+                 <i>During testing, you can activate Premium for free:</i>",
+                "✨ Activate Test Premium",
+            ),
+        };
+        let kb = json!({
+            "inline_keyboard": [[{ "text": btn, "callback_data": "pr:on" }]]
+        });
+        let _ = app.bot.send_message(chat, thread, prompt, Some(kb), Some(msg.message_id)).await;
+        return;
+    }
+
+    // 2. Check query
+    if query.is_empty() {
+        let hint = match lang {
+            Lang::Ru => "🔍 <b>Поиск видео</b>\n\nИспользование: <code>/search &lt;запрос&gt;</code>\nПример: <code>/search funny cats</code>",
+            Lang::Uk => "🔍 <b>Пошук відео</b>\n\nВикористання: <code>/search &lt;запит&gt;</code>\nПриклад: <code>/search funny cats</code>",
+            Lang::Es => "🔍 <b>Búsqueda de videos</b>\n\nUso: <code>/search &lt;búsqueda&gt;</code>\nEjemplo: <code>/search funny cats</code>",
+            _ => "🔍 <b>Video Search</b>\n\nUsage: <code>/search &lt;query&gt;</code>\nExample: <code>/search funny cats</code>",
+        };
+        app.say(chat, thread, hint, None).await;
+        return;
+    }
+
+    let searching_text = match lang {
+        Lang::Ru => format!("🔍 <i>Ищем видео по запросу «{}»...</i>", util::html_escape(query)),
+        Lang::Uk => format!("🔍 <i>Шукаємо відео за запитом «{}»...</i>", util::html_escape(query)),
+        Lang::Es => format!("🔍 <i>Buscando videos para «{}»...</i>", util::html_escape(query)),
+        _ => format!("🔍 <i>Searching videos for «{}»...</i>", util::html_escape(query)),
+    };
+
+    let sent = app.bot.send_message(chat, thread, &searching_text, None, Some(msg.message_id)).await;
+    let status_msg_id = sent.ok().map(|m| m.message_id);
+
+    let results = crate::search::search_youtube(&app.cfg, &app.search_slots, query, 5).await;
+
+    match results {
+        Ok(items) if !items.is_empty() => {
+            let title_header = match lang {
+                Lang::Ru => format!("🔍 <b>Результаты поиска «{}»:</b>\n", util::html_escape(query)),
+                Lang::Uk => format!("🔍 <b>Результати пошуку «{}»:</b>\n", util::html_escape(query)),
+                Lang::Es => format!("🔍 <b>Resultados de búsqueda «{}»:</b>\n", util::html_escape(query)),
+                _ => format!("🔍 <b>Search results for «{}»:</b>\n", util::html_escape(query)),
+            };
+
+            let num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
+            let mut lines = vec![title_header];
+            let mut keyboard_rows = Vec::new();
+
+            for (i, item) in items.iter().enumerate() {
+                let emoji = num_emojis.get(i).copied().unwrap_or("▶️");
+                let dur =
+                    if !item.duration_str.is_empty() { format!(" ({})", item.duration_str) } else { String::new() };
+
+                lines.push(format!(
+                    "{emoji} <a href=\"{}\"><b>{}</b></a>{dur}\n👤 <i>{}</i>\n",
+                    item.url,
+                    util::html_escape(&item.title),
+                    util::html_escape(&item.uploader)
+                ));
+
+                let (dl_video_btn, dl_audio_btn) = match lang {
+                    Lang::Ru => (format!("{emoji} 🎬 Скачать"), format!("{emoji} 🎵 MP3")),
+                    Lang::Uk => (format!("{emoji} 🎬 Завантажити"), format!("{emoji} 🎵 MP3")),
+                    Lang::Es => (format!("{emoji} 🎬 Descargar"), format!("{emoji} 🎵 MP3")),
+                    _ => (format!("{emoji} 🎬 Download"), format!("{emoji} 🎵 MP3")),
+                };
+
+                keyboard_rows.push(vec![
+                    json!({ "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) }),
+                    json!({ "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.id) }),
+                ]);
+            }
+
+            let text = lines.join("\n");
+            let markup = json!({ "inline_keyboard": keyboard_rows });
+
+            if let Some(msg_id) = status_msg_id {
+                let _ = app.bot.edit_message(chat, msg_id, &text, Some(markup)).await;
+            } else {
+                let _ = app.bot.send_message(chat, thread, &text, Some(markup), Some(msg.message_id)).await;
+            }
+        }
+        Ok(_) => {
+            let not_found = match lang {
+                Lang::Ru => format!("❌ По запросу «{}» ничего не найдено.", util::html_escape(query)),
+                Lang::Uk => format!("❌ За запитом «{}» нічого не знайдено.", util::html_escape(query)),
+                Lang::Es => format!("❌ No se encontraron resultados para «{}».", util::html_escape(query)),
+                _ => format!("❌ No videos found for «{}».", util::html_escape(query)),
+            };
+            if let Some(msg_id) = status_msg_id {
+                let _ = app.bot.edit_message(chat, msg_id, &not_found, None).await;
+            } else {
+                let _ = app.bot.send_message(chat, thread, &not_found, None, Some(msg.message_id)).await;
+            }
+        }
+        Err(err) => {
+            log::warn!("search error: {err}");
+            let error_text = match lang {
+                Lang::Ru => "⚠️ Не удалось выполнить поиск. Попробуйте другой запрос позже.",
+                Lang::Uk => "⚠️ Не вдалося виконати пошук. Спробуйте інший запит пізніше.",
+                Lang::Es => "⚠️ Error al realizar la búsqueda. Inténtalo de nuevo más tarde.",
+                _ => "⚠️ Failed to execute search. Please try another query later.",
+            };
+            if let Some(msg_id) = status_msg_id {
+                let _ = app.bot.edit_message(chat, msg_id, error_text, None).await;
+            } else {
+                let _ = app.bot.send_message(chat, thread, error_text, None, Some(msg.message_id)).await;
+            }
+        }
+    }
+}
+
 async fn send_backup(app: &Arc<App>, admin_user_id: i64, origin_chat_id: i64, origin_thread_id: Option<i64>) {
     let now = state::now_secs();
     let file_name = format!("bot_backup_{now}.db");
@@ -376,6 +525,7 @@ async fn send_backup(app: &Arc<App>, admin_user_id: i64, origin_chat_id: i64, or
         title: None,
         performer: None,
         thumb: None,
+        markup: None,
     };
 
     match app.bot.send_media(&media, None).await {
@@ -742,6 +892,12 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
             || (!app.bot.username.is_empty()
                 && text.to_lowercase().contains(&format!("@{}", app.bot.username.to_lowercase())));
         if addressed && msg.text.is_some() {
+            let query = text.trim();
+            if !msg.chat.is_group() && app.store.is_user_premium(user.id) && query.len() >= 2 && !query.starts_with('/')
+            {
+                handle_search_command(app, &msg, &ctx, query).await;
+                return;
+            }
             app.say(ctx.chat, ctx.thread, t.nudge, None).await;
         }
         return;
@@ -803,6 +959,88 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 limits.push_str(&fill(t.help_limit_duration, &[("dur", &util::fmt_duration(app.cfg.max_duration))]));
             }
             app.say(chat, thread, &format!("{}\n\n{limits}", t.help), None).await;
+        }
+        "search" | "find" | "s" => {
+            handle_search_command(app, msg, ctx, args).await;
+        }
+        "comments" | "comm" => {
+            let urls = urls_of(msg, args);
+            if urls.is_empty() {
+                let hint = match ctx.lang {
+                    Lang::Ru => "ℹ️ Чтобы прочитать топ-комментарии, укажите ссылку на видео:\n<code>/comments https://youtube.com/watch?v=...</code>",
+                    Lang::Uk => "ℹ️ Щоб прочитати топ-коментарі, надішліть посилання на відео:\n<code>/comments https://youtube.com/watch?v=...</code>",
+                    Lang::Es => "ℹ️ Para ver los mejores comentarios, proporciona un enlace al video:\n<code>/comments https://youtube.com/watch?v=...</code>",
+                    _ => "ℹ️ To read top comments, provide a video link:\n<code>/comments https://youtube.com/watch?v=...</code>",
+                };
+                app.say(chat, thread, hint, None).await;
+                return;
+            }
+            let url = &urls[0];
+            let vid_opt =
+                crate::cachekey::local_video_key(url).and_then(|k| k.strip_prefix("youtube:").map(str::to_string));
+            let Some(vid) = vid_opt else {
+                let fail = match ctx.lang {
+                    Lang::Ru => "⚠️ Чтение комментариев поддерживается для YouTube-видео.",
+                    Lang::Uk => "⚠️ Читання коментарів підтримується для YouTube-відео.",
+                    Lang::Es => "⚠️ Los comentarios son compatibles con videos de YouTube.",
+                    _ => "⚠️ Comments are supported for YouTube videos.",
+                };
+                app.say(chat, thread, fail, None).await;
+                return;
+            };
+
+            let is_premium = app.store.is_user_premium(ctx.user);
+            if !is_premium {
+                let prompt = match ctx.lang {
+                    Lang::Ru => "⭐ <b>Чтение комментариев доступно только с Premium</b>\n\nАктивируйте бесплатный тестовый Premium:",
+                    Lang::Uk => "⭐ <b>Читання коментарів доступне лише з Premium</b>\n\nАктивуйте тестовий Premium:",
+                    Lang::Es => "⭐ <b>La lectura de comentarios solo está disponible con Premium</b>\n\nActiva Premium de prueba:",
+                    _ => "⭐ <b>Reading comments is only available with Premium</b>\n\nActivate test Premium:",
+                };
+                let kb = json!({
+                    "inline_keyboard": [[{ "text": "✨ Активировать тестовый Premium", "callback_data": "pr:on" }]]
+                });
+                let _ = app.bot.send_message(chat, thread, prompt, Some(kb), Some(msg.message_id)).await;
+                return;
+            }
+
+            let loading = match ctx.lang {
+                Lang::Ru => "💬 <i>Загружаю комментарии...</i>",
+                Lang::Uk => "💬 <i>Завантажую коментарі...</i>",
+                Lang::Es => "💬 <i>Cargando comentarios...</i>",
+                _ => "💬 <i>Loading comments...</i>",
+            };
+            let status_msg_id = app
+                .bot
+                .send_message(chat, thread, loading, None, Some(msg.message_id))
+                .await
+                .ok()
+                .map(|m| m.message_id);
+
+            let app_clone = app.clone();
+            let lang = ctx.lang;
+            tokio::spawn(async move {
+                match crate::comments::fetch_comments(&app_clone.cfg, &app_clone.comment_slots, &vid).await {
+                    Ok((title, items)) => {
+                        let (text, kb) = crate::comments::render_comments_page(&vid, title.as_deref(), &items, 0, lang);
+                        if let Some(mid) = status_msg_id {
+                            let _ = app_clone.bot.edit_message(chat, mid, &text, Some(kb)).await;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Fetch comments for {vid} failed: {e}");
+                        let err_text = match lang {
+                            Lang::Ru => "⚠️ Не удалось загрузить комментарии к этому видео (возможно, они отключены).",
+                            Lang::Uk => "⚠️ Не вдалося завантажити коментарі до цього відео.",
+                            Lang::Es => "⚠️ No se pudieron cargar los comentarios de este video.",
+                            _ => "⚠️ Failed to load comments for this video.",
+                        };
+                        if let Some(mid) = status_msg_id {
+                            let _ = app_clone.bot.edit_message(chat, mid, err_text, None).await;
+                        }
+                    }
+                }
+            });
         }
         "premium" => {
             let (text, kb) = premium_menu(app, ctx.user, ctx.lang);
@@ -1250,7 +1488,7 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
             let (text, kb) = premium_menu(app, cb.from.id, lang);
             let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
         }
-        "sub" => {
+        "s" | "sub" => {
             let parts: Vec<&str> = rest.split(':').collect();
             match parts.as_slice() {
                 ["unsub", channel_id] => {
@@ -1283,11 +1521,19 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                     let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
                 }
                 ["dl", kind, video_id] => {
-                    let quality = if *kind == "a" { Quality::Audio } else { Quality::Max };
+                    let quality = if *kind == "a" {
+                        Quality::Audio
+                    } else {
+                        app.store.default_quality(cb.from.id).unwrap_or(Quality::Max)
+                    };
                     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
                     let alert = match (lang, *kind) {
                         (Lang::Ru, "a") => "🎵 Аудио добавлено в очередь!",
                         (Lang::Ru, _) => "📥 Видео добавлено в очередь!",
+                        (Lang::Uk, "a") => "🎵 Аудіо додано до черги!",
+                        (Lang::Uk, _) => "📥 Відео додано до черги!",
+                        (Lang::Es, "a") => "🎵 ¡Audio añadido a la cola!",
+                        (Lang::Es, _) => "📥 ¡Video añadido a la cola!",
                         (_, "a") => "🎵 Audio queued!",
                         (_, _) => "📥 Video queued!",
                     };
@@ -1300,6 +1546,85 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                     app.bot.answer_callback(&cb.id, None, false).await;
                 }
             }
+        }
+        "comm" => {
+            let parts: Vec<&str> = rest.split(':').collect();
+            let video_id = parts.first().copied().unwrap_or_default();
+            let page: usize = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+
+            if video_id.is_empty() {
+                app.bot.answer_callback(&cb.id, None, false).await;
+                return;
+            }
+
+            let is_premium = app.store.is_user_premium(cb.from.id);
+            if !is_premium {
+                let alert = match lang {
+                    Lang::Ru => "⭐ Чтение комментариев доступно только с Premium! Включите его в /premium",
+                    Lang::Uk => "⭐ Читання коментарів доступне лише з Premium! Увімкніть його у /premium",
+                    Lang::Es => "⭐ ¡La lectura de comentarios solo está disponible con Premium! Actívalo en /premium",
+                    _ => "⭐ Reading comments is only available with Premium! Activate it in /premium",
+                };
+                app.bot.answer_callback(&cb.id, Some(alert), true).await;
+                return;
+            }
+
+            app.bot.answer_callback(&cb.id, None, false).await;
+
+            let is_existing_comments_view = msg.text.as_deref().is_some_and(|t| t.starts_with("💬"));
+            let status_msg_id = if !is_existing_comments_view {
+                let loading = match lang {
+                    Lang::Ru => "💬 <i>Загружаю комментарии...</i>",
+                    Lang::Uk => "💬 <i>Завантажую коментарі...</i>",
+                    Lang::Es => "💬 <i>Cargando comentarios...</i>",
+                    _ => "💬 <i>Loading comments...</i>",
+                };
+                app.bot
+                    .send_message(msg.chat.id, msg.thread(), loading, None, Some(msg.message_id))
+                    .await
+                    .ok()
+                    .map(|m| m.message_id)
+            } else {
+                Some(msg.message_id)
+            };
+
+            let app_clone = app.clone();
+            let vid = video_id.to_string();
+            let chat_id = msg.chat.id;
+            let thread_id = msg.thread();
+
+            tokio::spawn(async move {
+                match crate::comments::fetch_comments(&app_clone.cfg, &app_clone.comment_slots, &vid).await {
+                    Ok((title, items)) => {
+                        let (text, kb) =
+                            crate::comments::render_comments_page(&vid, title.as_deref(), &items, page, lang);
+                        if let Some(mid) = status_msg_id {
+                            let _ = app_clone.bot.edit_message(chat_id, mid, &text, Some(kb)).await;
+                        } else {
+                            let _ = app_clone.bot.send_message(chat_id, thread_id, &text, Some(kb), None).await;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Fetch comments for {vid} failed: {e}");
+                        let err_text = match lang {
+                            Lang::Ru => "⚠️ Не удалось загрузить комментарии к этому видео (возможно, они отключены).",
+                            Lang::Uk => "⚠️ Не вдалося завантажити коментарі до цього відео.",
+                            Lang::Es => "⚠️ No se pudieron cargar los comentarios de este video.",
+                            _ => "⚠️ Failed to load comments for this video.",
+                        };
+                        if let Some(mid) = status_msg_id {
+                            let _ = app_clone.bot.edit_message(chat_id, mid, err_text, None).await;
+                        }
+                    }
+                }
+            });
+        }
+        "del" => {
+            app.bot.answer_callback(&cb.id, None, false).await;
+            let _ = app.bot.delete_message(msg.chat.id, msg.message_id).await;
+        }
+        "noop" => {
+            app.bot.answer_callback(&cb.id, None, false).await;
         }
         _ => app.bot.answer_callback(&cb.id, None, false).await,
     }
@@ -1344,19 +1669,130 @@ async fn handle_inline_query(app: &Arc<App>, iq: InlineQuery) {
 
     let urls = util::extract_urls(query, 1);
     let Some(url) = urls.first().cloned() else {
-        let article = json!({
-            "type": "article",
-            "id": "invalid",
-            "title": t.inline_prompt_title,
-            "description": t.inline_prompt_desc,
-            "input_message_content": {
-                "message_text": format!("@{}", app.bot.username),
+        // Query has no URLs -> Video Search (Premium feature)
+        let is_premium = app.store.is_user_premium(iq.from.id);
+        if !is_premium {
+            let (title, desc, btn_text) = match lang {
+                Lang::Ru => (
+                    "⭐ Поиск видео доступен с Premium",
+                    "Нажмите кнопку ниже, чтобы активировать Premium в боте",
+                    "⭐ Активировать Premium",
+                ),
+                Lang::Uk => (
+                    "⭐ Пошук відео доступний з Premium",
+                    "Натисніть кнопку нижче, щоб активувати Premium в боті",
+                    "⭐ Активувати Premium",
+                ),
+                Lang::Es => (
+                    "⭐ Búsqueda disponible con Premium",
+                    "Haz clic en el botón de abajo para activar Premium",
+                    "⭐ Activar Premium",
+                ),
+                _ => (
+                    "⭐ Video search requires Premium",
+                    "Click the button below to activate Premium in the bot",
+                    "⭐ Activate Premium",
+                ),
+            };
+            let article = json!({
+                "type": "article",
+                "id": "prem_search_required",
+                "title": title,
+                "description": desc,
+                "input_message_content": {
+                    "message_text": "/premium",
+                }
+            });
+            let _ =
+                app.bot.answer_inline_query(&iq.id, &[article], Some(10), true, Some(btn_text), Some("premium")).await;
+            return;
+        }
+
+        // User is Premium!
+        let mut results: Vec<Value> = Vec::new();
+
+        // 1. Search local SQLite cache (instant delivery by file_id)
+        let cached = app.store.cache_search(query, 5);
+        for (i, entry) in cached.into_iter().enumerate() {
+            let credit = (!app.bot.username.is_empty()).then(|| fill(t.caption_credit, &[("bot", &app.bot.username)]));
+            let caption = crate::app::build_caption(&entry.title, "", credit.as_deref());
+            let title = if entry.title.is_empty() { "Cached video" } else { &entry.title };
+            let res = match entry.kind.as_str() {
+                "audio" => json!({
+                    "type": "audio",
+                    "id": format!("c_audio_{i}_{}", entry.file_id),
+                    "audio_file_id": entry.file_id,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                }),
+                "document" => json!({
+                    "type": "document",
+                    "id": format!("c_doc_{i}_{}", entry.file_id),
+                    "document_file_id": entry.file_id,
+                    "title": title,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                }),
+                _ => json!({
+                    "type": "video",
+                    "id": format!("c_vid_{i}_{}", entry.file_id),
+                    "video_file_id": entry.file_id,
+                    "title": format!("⚡ {title}"),
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                }),
+            };
+            results.push(res);
+        }
+
+        // 2. Search YouTube
+        if results.len() < 5 {
+            let yt_limit = 5 - results.len();
+            if let Ok(yt_items) = crate::search::search_youtube(&app.cfg, &app.search_slots, query, yt_limit).await {
+                for (i, item) in yt_items.into_iter().enumerate() {
+                    let desc = if !item.duration_str.is_empty() {
+                        format!("{} • {}", item.uploader, item.duration_str)
+                    } else {
+                        item.uploader.clone()
+                    };
+                    let mut article = json!({
+                        "type": "article",
+                        "id": format!("yt_{i}_{}", item.id),
+                        "title": item.title,
+                        "description": desc,
+                        "input_message_content": {
+                            "message_text": item.url,
+                        }
+                    });
+                    if let Some(thumb) = &item.thumb_url {
+                        article["thumbnail_url"] = json!(thumb);
+                        article["thumb_url"] = json!(thumb);
+                    }
+                    results.push(article);
+                }
             }
-        });
-        let _ = app
-            .bot
-            .answer_inline_query(&iq.id, &[article], Some(300), true, Some(t.inline_switch_pm), Some("inline"))
-            .await;
+        }
+
+        if results.is_empty() {
+            let (no_res_title, no_res_desc) = match lang {
+                Lang::Ru => ("Ничего не найдено", "Попробуйте изменить поисковый запрос"),
+                Lang::Uk => ("Нічого не знайдено", "Спробуйте змінити пошуковий запит"),
+                Lang::Es => ("Sin resultados", "Intenta con otro término de búsqueda"),
+                _ => ("No results found", "Try a different search query"),
+            };
+            let article = json!({
+                "type": "article",
+                "id": "empty_search",
+                "title": no_res_title,
+                "description": no_res_desc,
+                "input_message_content": {
+                    "message_text": format!("🔍 {query}"),
+                }
+            });
+            results.push(article);
+        }
+
+        let _ = app.bot.answer_inline_query(&iq.id, &results, Some(300), true, None, None).await;
         return;
     };
 
@@ -1473,7 +1909,8 @@ mod tests {
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
-        assert_eq!(command_list(Lang::Ru.t()).len(), 12);
+        assert_eq!(command_list(Lang::Ru.t()).len(), 13);
+        assert!(command_list(Lang::Ru.t()).iter().any(|(cmd, _)| *cmd == "search"));
         let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080)).unwrap();
         let lq_str = lq.to_string();
         assert!(

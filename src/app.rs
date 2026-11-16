@@ -151,6 +151,10 @@ pub struct App {
     pub slots: Semaphore,
     /// Upload slots to stream to Telegram concurrently without blocking new downloads.
     pub upload_slots: Semaphore,
+    /// Video search concurrency limit.
+    pub search_slots: Semaphore,
+    /// Video comments extraction concurrency limit.
+    pub comment_slots: Semaphore,
     /// Per-user turn (RATE_LIMIT_PER_USER), created on demand.
     user_slots: Mutex<HashMap<i64, Arc<Semaphore>>>,
     jobs: Mutex<HashMap<String, Entry>>,
@@ -462,6 +466,8 @@ impl App {
             meta: Arc::new(crate::meta::TitleResolver::new()),
             slots,
             upload_slots,
+            search_slots: Semaphore::new(2),
+            comment_slots: Semaphore::new(2),
             user_slots: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
@@ -1056,6 +1062,19 @@ impl App {
         let credit =
             (!self.bot.username.is_empty()).then(|| fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)]));
         let caption = (!job.minimal).then(|| build_caption(&entry.title, &job.url, credit.as_deref()));
+        let yt_markup = job.video_key.strip_prefix("youtube:").map(|vid| {
+            let btn_text = match job.lang {
+                Lang::Ru => "💬 Комментарии",
+                Lang::Uk => "💬 Коментарі",
+                Lang::Es => "💬 Comentarios",
+                _ => "💬 Comments",
+            };
+            json!({
+                "inline_keyboard": [
+                    [{ "text": btn_text, "callback_data": format!("comm:{vid}:0") }]
+                ]
+            })
+        });
         let media = Media {
             kind,
             chat_id: job.chat_id,
@@ -1069,6 +1088,7 @@ impl App {
             title: (!entry.title.is_empty()).then_some(entry.title.as_str()),
             performer: (!entry.performer.is_empty()).then_some(entry.performer.as_str()),
             thumb: None,
+            markup: yt_markup,
         };
         match self.send_with_retry(&media, &job.sent).await {
             Ok(_) => true,
@@ -1085,6 +1105,19 @@ impl App {
             (!self.bot.username.is_empty()).then(|| fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)]));
         let caption = (!job.minimal).then(|| build_caption(&ready.title, &job.url, credit.as_deref()));
         let source = if self.cfg.local_api_files { Source::LocalUri(&ready.path) } else { Source::Upload(&ready.path) };
+        let yt_markup = job.video_key.strip_prefix("youtube:").map(|vid| {
+            let btn_text = match job.lang {
+                Lang::Ru => "💬 Комментарии",
+                Lang::Uk => "💬 Коментарі",
+                Lang::Es => "💬 Comentarios",
+                _ => "💬 Comments",
+            };
+            json!({
+                "inline_keyboard": [
+                    [{ "text": btn_text, "callback_data": format!("comm:{vid}:0") }]
+                ]
+            })
+        });
         let mut media = Media {
             kind: ready.kind,
             chat_id: job.chat_id,
@@ -1098,6 +1131,7 @@ impl App {
             title: (!ready.title.is_empty()).then_some(ready.title.as_str()),
             performer: (!ready.performer.is_empty()).then_some(ready.performer.as_str()),
             thumb: ready.thumb.as_deref(),
+            markup: yt_markup,
         };
         job.stage.send_replace(Stage::Uploading { total: ready.size });
         match self.send_with_retry(&media, &job.sent).await {
