@@ -16,6 +16,7 @@ mod plugins;
 mod proc;
 mod state;
 mod stats;
+mod subs;
 mod sys;
 mod telegram;
 mod types;
@@ -276,6 +277,7 @@ async fn run(cfg: Config) -> i32 {
     tokio::spawn(housekeeping(app.clone()));
     tokio::spawn(updater(app.clone()));
     tokio::spawn(daily_digest_loop(app.clone()));
+    subs::start_subscription_subsystem(app.clone());
 
     // Recover interrupted jobs from previous run / crash
     let saved_jobs = app.store.take_active_jobs();

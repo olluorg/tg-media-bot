@@ -23,6 +23,8 @@ pub fn command_list(t: &Strings) -> Vec<(&'static str, &'static str)> {
     vec![
         ("start", t.c_start),
         ("help", t.c_help),
+        ("premium", t.c_premium),
+        ("subscriptions", t.c_subscriptions),
         ("quality", t.c_quality),
         ("status", t.c_status),
         ("mystats", t.c_mystats),
@@ -101,6 +103,248 @@ fn top_keyboard(current_days: u64) -> Value {
             ]
         ]
     })
+}
+
+fn premium_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
+    let is_premium = app.store.is_user_premium(user_id);
+    let sub_count = app.store.count_user_subscriptions(user_id);
+    let limit = app.cfg.premium_limit;
+
+    let (text, btn_text, action) = match lang {
+        Lang::Ru => {
+            if is_premium {
+                (
+                    format!(
+                        "✨ <b>Ваш статус: Premium активен</b>\n\n\
+                         📺 Отслеживание каналов: <b>{sub_count}/{limit}</b>\n\
+                         Бот автоматически присылает новые видео с ваших подписок с кнопками быстрого скачивания.",
+                    ),
+                    "Отключить Premium",
+                    "pr:off",
+                )
+            } else {
+                (
+                    format!(
+                        "⭐ <b>Подписка Premium</b>\n\n\
+                         С Premium вы можете подписаться на любые YouTube-каналы и первыми получать новые видео прямо в Telegram!\n\n\
+                         • Лимит: до {limit} каналов\n\
+                         • Мгновенные уведомления о новых видео\n\
+                         • Скачивание видео/аудио в 1 клик\n\n\
+                         <i>Пока идет тестирование, Premium можно активировать бесплатно:</i>",
+                    ),
+                    "✨ Активировать тестовый Premium",
+                    "pr:on",
+                )
+            }
+        }
+        _ => {
+            if is_premium {
+                (
+                    format!(
+                        "✨ <b>Your status: Premium Active</b>\n\n\
+                         📺 Tracked channels: <b>{sub_count}/{limit}</b>\n\
+                         The bot automatically sends new videos from your subscriptions with 1-click download buttons.",
+                    ),
+                    "Disable Premium",
+                    "pr:off",
+                )
+            } else {
+                (
+                    format!(
+                        "⭐ <b>Premium Subscription</b>\n\n\
+                         With Premium you can subscribe to YouTube channels and receive new releases directly in Telegram!\n\n\
+                         • Limit: up to {limit} channels\n\
+                         • Instant notifications on new uploads\n\
+                         • 1-click video/audio downloads\n\n\
+                         <i>During testing, you can activate Premium for free:</i>",
+                    ),
+                    "✨ Activate Test Premium",
+                    "pr:on",
+                )
+            }
+        }
+    };
+
+    let kb = json!({
+        "inline_keyboard": [
+            [{ "text": btn_text, "callback_data": action }]
+        ]
+    });
+
+    (text, kb)
+}
+
+fn subscriptions_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
+    let subs = app.store.get_user_subscriptions(user_id);
+    let limit = app.cfg.premium_limit;
+    let is_premium = app.store.is_user_premium(user_id);
+
+    if subs.is_empty() {
+        let text = match lang {
+            Lang::Ru => {
+                if !is_premium {
+                    "📺 <b>У вас нет активных подписок</b>\n\nФункция отслеживания каналов доступна с Premium.\nАктивируйте его через команду /premium!"
+                } else {
+                    "📺 <b>У вас пока нет активных подписок</b>\n\nЧтобы подписаться, просто отправьте боту ссылку на YouTube-канал (например, <code>https://youtube.com/@канал</code>)!"
+                }
+            }
+            _ => {
+                if !is_premium {
+                    "📺 <b>No active subscriptions</b>\n\nChannel tracking is available with Premium.\nActivate it via /premium!"
+                } else {
+                    "📺 <b>No active subscriptions yet</b>\n\nTo subscribe, just send a YouTube channel link (e.g. <code>https://youtube.com/@channel</code>)!"
+                }
+            }
+        };
+        return (text.to_string(), json!({ "inline_keyboard": [] }));
+    }
+
+    let header = match lang {
+        Lang::Ru => format!(
+            "📺 <b>Ваши подписки ({}/{}):</b>\n<i>Нажмите на кнопку с каналом, чтобы отписаться</i>",
+            subs.len(),
+            limit
+        ),
+        _ => format!(
+            "📺 <b>Your subscriptions ({}/{}):</b>\n<i>Click a channel button to unsubscribe</i>",
+            subs.len(),
+            limit
+        ),
+    };
+
+    let mut buttons = Vec::new();
+    for (channel_id, title) in subs {
+        let label = format!("❌ {}", util::truncate_chars(&title, 25));
+        buttons.push(vec![json!({
+            "text": label,
+            "callback_data": format!("sub:unsub:{}", channel_id)
+        })]);
+    }
+
+    (header, json!({ "inline_keyboard": buttons }))
+}
+
+async fn handle_channel_subscription_request(app: &Arc<App>, ctx: &Ctx, url: &str, reply_to: Option<i64>) {
+    let user_id = ctx.user;
+    let (chat, thread) = (ctx.chat, ctx.thread);
+    let lang = ctx.lang;
+
+    // 1. Check if user is premium
+    if !app.store.is_user_premium(user_id) {
+        let (prompt, btn) = match lang {
+            Lang::Ru => (
+                "⭐ <b>Отслеживание каналов доступно только с Premium</b>\n\n\
+                 С Premium бот будет автоматически присылать новые ролики с ваших любимых каналов с кнопками скачивания в 1 клик.\n\n\
+                 <i>Пока идет тестирование, Premium можно активировать бесплатно:</i>",
+                "✨ Активировать тестовый Premium",
+            ),
+            _ => (
+                "⭐ <b>Channel subscriptions require Premium</b>\n\n\
+                 With Premium, the bot will automatically send new videos from your favorite channels with 1-click download buttons.\n\n\
+                 <i>During testing, you can activate Premium for free:</i>",
+                "✨ Activate Test Premium",
+            ),
+        };
+        let kb = json!({
+            "inline_keyboard": [[{ "text": btn, "callback_data": "pr:on" }]]
+        });
+        let _ = app.bot.send_message(chat, thread, prompt, Some(kb), reply_to).await;
+        return;
+    }
+
+    // 2. Check channel limit
+    let current_count = app.store.count_user_subscriptions(user_id);
+    if current_count >= app.cfg.premium_limit {
+        let text = match lang {
+            Lang::Ru => format!(
+                "❌ <b>Достигнут лимит подписок ({})</b>\n\nУдалите ненужные каналы через /subscriptions, чтобы добавить новый.",
+                app.cfg.premium_limit
+            ),
+            _ => format!(
+                "❌ <b>Subscription limit reached ({})</b>\n\nRemove unneeded channels via /subscriptions to add a new one.",
+                app.cfg.premium_limit
+            ),
+        };
+        let _ = app.bot.send_message(chat, thread, &text, None, reply_to).await;
+        return;
+    }
+
+    // 3. Status message: resolving channel
+    let resolving_text = match lang {
+        Lang::Ru => "🔍 Определяю канал...",
+        _ => "🔍 Resolving channel...",
+    };
+    let status_msg = app.bot.send_message(chat, thread, resolving_text, None, reply_to).await.ok();
+
+    // 4. Resolve channel
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(12)).build().unwrap_or_default();
+    match crate::subs::resolver::resolve_channel(&http, url).await {
+        Ok(info) => {
+            match app.store.add_subscription(user_id, &info.channel_id, &info.title, info.latest_video_id.as_deref()) {
+                Ok(is_new_to_system) => {
+                    // If channel had 0 subscribers and WebSub is enabled, subscribe to Google Hub
+                    if is_new_to_system {
+                        if let Some(pub_url) = &app.cfg.websub_public_url {
+                            let pub_url = pub_url.clone();
+                            let ch_id = info.channel_id.clone();
+                            let sec = app.cfg.websub_secret.clone();
+                            let http_clone = http.clone();
+                            tokio::spawn(async move {
+                                let _ = crate::subs::websub::send_hub_request(
+                                    &http_clone,
+                                    &pub_url,
+                                    &ch_id,
+                                    "subscribe",
+                                    sec.as_deref(),
+                                    864000,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+
+                    let success_text = match lang {
+                        Lang::Ru => format!(
+                            "✅ <b>Вы успешно подписались на канал:</b>\n📺 <b>{}</b>\n\n\
+                             Бот уведомит вас, как только выйдет новое видео!\n\n\
+                             Список ваших подписок: /subscriptions",
+                            util::html_escape(&info.title)
+                        ),
+                        _ => format!(
+                            "✅ <b>Successfully subscribed to channel:</b>\n📺 <b>{}</b>\n\n\
+                             The bot will notify you as soon as a new video is published!\n\n\
+                             Manage your subscriptions: /subscriptions",
+                            util::html_escape(&info.title)
+                        ),
+                    };
+
+                    if let Some(sm) = status_msg {
+                        let _ = app.bot.edit_message(chat, sm.message_id, &success_text, None).await;
+                    } else {
+                        let _ = app.bot.send_message(chat, thread, &success_text, None, reply_to).await;
+                    }
+                }
+                Err(e) => {
+                    let err_text = format!("❌ Ошибка сохранения подписки: {e}");
+                    if let Some(sm) = status_msg {
+                        let _ = app.bot.edit_message(chat, sm.message_id, &err_text, None).await;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("Channel resolve failed: {e}");
+            let fail_text = match lang {
+                Lang::Ru => "❌ Не удалось определить канал по ссылке.\nУбедитесь, что ссылка ведет на канал YouTube (например, <code>https://youtube.com/@название_канала</code>).",
+                _ => "❌ Could not resolve YouTube channel from link.\nPlease make sure the link points to a channel (e.g. <code>https://youtube.com/@channel_name</code>).",
+            };
+            if let Some(sm) = status_msg {
+                let _ = app.bot.edit_message(chat, sm.message_id, fail_text, None).await;
+            } else {
+                let _ = app.bot.send_message(chat, thread, fail_text, None, reply_to).await;
+            }
+        }
+    }
 }
 
 async fn send_backup(app: &Arc<App>, admin_user_id: i64, origin_chat_id: i64, origin_thread_id: Option<i64>) {
@@ -503,6 +747,14 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
         return;
     }
 
+    if app.cfg.subs_enabled && !msg.chat.is_group() && urls.len() == 1 {
+        let first_url = &urls[0];
+        if crate::subs::resolver::is_channel_url(first_url) {
+            handle_channel_subscription_request(app, &ctx, first_url, Some(msg.message_id)).await;
+            return;
+        }
+    }
+
     let room = app.user_room(user.id);
     if room == 0 {
         let text = Refusal::UserQueueFull.text(t, app.cfg.user_queue, app.cfg.user_queue);
@@ -551,6 +803,45 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 limits.push_str(&fill(t.help_limit_duration, &[("dur", &util::fmt_duration(app.cfg.max_duration))]));
             }
             app.say(chat, thread, &format!("{}\n\n{limits}", t.help), None).await;
+        }
+        "premium" => {
+            let (text, kb) = premium_menu(app, ctx.user, ctx.lang);
+            app.say(chat, thread, &text, Some(kb)).await;
+        }
+        "subscriptions" | "subs" => {
+            let (text, kb) = subscriptions_menu(app, ctx.user, ctx.lang);
+            app.say(chat, thread, &text, Some(kb)).await;
+        }
+        "sub" | "subscribe" => {
+            let urls = urls_of(msg, args);
+            if urls.is_empty() {
+                let hint = match ctx.lang {
+                    Lang::Ru => "ℹ️ Чтобы подписаться на YouTube-канал, отправьте команду со ссылкой:\n<code>/sub https://youtube.com/@канал</code>",
+                    _ => "ℹ️ To subscribe to a YouTube channel, send the command with a link:\n<code>/sub https://youtube.com/@channel</code>",
+                };
+                app.say(chat, thread, hint, None).await;
+                return;
+            }
+            let url = &urls[0];
+            if crate::subs::resolver::is_video_url(url) {
+                let warn = match ctx.lang {
+                    Lang::Ru => "⚠️ Это ссылка на видео, а не на канал. Чтобы подписаться на новые выпуски автора, отправьте ссылку на сам канал (например, <code>https://youtube.com/@имя_канала</code>).",
+                    _ => "⚠️ This is a video link, not a channel link. To subscribe to new releases, send a channel link (e.g. <code>https://youtube.com/@channel</code>).",
+                };
+                app.say(chat, thread, warn, None).await;
+                return;
+            }
+            if crate::subs::resolver::is_channel_url(url) {
+                handle_channel_subscription_request(app, ctx, url, Some(msg.message_id)).await;
+                return;
+            } else {
+                let fail = match ctx.lang {
+                    Lang::Ru => "⚠️ Пожалуйста, укажите корректную ссылку на YouTube-канал (например, <code>https://youtube.com/@имя_канала</code>).",
+                    _ => "⚠️ Please provide a valid YouTube channel link (e.g. <code>https://youtube.com/@channel_name</code>).",
+                };
+                app.say(chat, thread, fail, None).await;
+                return;
+            }
         }
         "lang" | "language" => app.say(chat, thread, LANG_PROMPT, Some(lang_keyboard())).await,
         "quality" => {
@@ -946,6 +1237,70 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 }
             }
         }
+        "pr" => {
+            let is_on = rest == "on";
+            app.store.set_user_premium(cb.from.id, is_on, 0);
+            let alert = match (lang, is_on) {
+                (Lang::Ru, true) => "✨ Тестовый Premium успешно активирован!",
+                (Lang::Ru, false) => "Premium отключен",
+                (_, true) => "✨ Test Premium activated!",
+                (_, false) => "Premium disabled",
+            };
+            app.bot.answer_callback(&cb.id, Some(alert), false).await;
+            let (text, kb) = premium_menu(app, cb.from.id, lang);
+            let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+        }
+        "sub" => {
+            let parts: Vec<&str> = rest.split(':').collect();
+            match parts.as_slice() {
+                ["unsub", channel_id] => {
+                    let removed = app.store.remove_subscription(cb.from.id, channel_id).unwrap_or(false);
+                    if removed {
+                        if let Some(pub_url) = &app.cfg.websub_public_url {
+                            let pub_url = pub_url.clone();
+                            let ch_id = channel_id.to_string();
+                            let sec = app.cfg.websub_secret.clone();
+                            tokio::spawn(async move {
+                                let http = reqwest::Client::new();
+                                let _ = crate::subs::websub::send_hub_request(
+                                    &http,
+                                    &pub_url,
+                                    &ch_id,
+                                    "unsubscribe",
+                                    sec.as_deref(),
+                                    864000,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    let alert = match lang {
+                        Lang::Ru => "🔕 Вы отписались от этого канала",
+                        _ => "🔕 Unsubscribed from channel",
+                    };
+                    app.bot.answer_callback(&cb.id, Some(alert), false).await;
+                    let (text, kb) = subscriptions_menu(app, cb.from.id, lang);
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+                }
+                ["dl", kind, video_id] => {
+                    let quality = if *kind == "a" { Quality::Audio } else { Quality::Max };
+                    let video_url = format!("https://www.youtube.com/watch?v={video_id}");
+                    let alert = match (lang, *kind) {
+                        (Lang::Ru, "a") => "🎵 Аудио добавлено в очередь!",
+                        (Lang::Ru, _) => "📥 Видео добавлено в очередь!",
+                        (_, "a") => "🎵 Audio queued!",
+                        (_, _) => "📥 Video queued!",
+                    };
+                    app.bot.answer_callback(&cb.id, Some(alert), false).await;
+
+                    let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: cb.from.id, lang };
+                    enqueue_all(app, &ctx, vec![video_url], quality, None, None).await;
+                }
+                _ => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                }
+            }
+        }
         _ => app.bot.answer_callback(&cb.id, None, false).await,
     }
 }
@@ -1118,7 +1473,7 @@ mod tests {
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
-        assert_eq!(command_list(Lang::Ru.t()).len(), 10);
+        assert_eq!(command_list(Lang::Ru.t()).len(), 12);
         let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080)).unwrap();
         let lq_str = lq.to_string();
         assert!(

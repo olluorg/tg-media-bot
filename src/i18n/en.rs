@@ -113,6 +113,8 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     c_minimal: "Minimal UI: on|off",
     c_topic: "Stay in one topic: lock|unlock|status",
     c_lang: "Language",
+    c_premium: "Premium status and subscriptions",
+    c_subscriptions: "Manage channel subscriptions",
     caption_credit: "📥 via @{bot}",
     inline_not_found_title: "Media not in cache yet",
     inline_not_found_desc: "Click the button below to download it in bot",

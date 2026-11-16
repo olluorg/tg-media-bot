@@ -113,6 +113,8 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud y más 
     c_minimal: "Interfaz mínima: on|off",
     c_topic: "Limitar a un tema: lock|unlock|status",
     c_lang: "Idioma",
+    c_premium: "Estado premium y suscripciones",
+    c_subscriptions: "Gestionar suscripciones de canales",
     caption_credit: "📥 vía @{bot}",
     inline_not_found_title: "El contenido aún no está en caché",
     inline_not_found_desc: "Toca el botón abajo para descargarlo en el bot",

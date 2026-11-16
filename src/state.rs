@@ -135,7 +135,44 @@ fn init_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
              status_msg INTEGER,
              user_msg_id INTEGER,
              created_at INTEGER NOT NULL
-         );",
+         );
+
+         CREATE TABLE IF NOT EXISTS user_premium (
+             user_id INTEGER PRIMARY KEY,
+             is_premium INTEGER NOT NULL DEFAULT 0,
+             expires_at INTEGER NOT NULL DEFAULT 0
+         );
+
+         CREATE TABLE IF NOT EXISTS tracked_channels (
+             channel_id TEXT PRIMARY KEY,
+             title TEXT NOT NULL DEFAULT '',
+             last_video_id TEXT,
+             last_published_at INTEGER NOT NULL DEFAULT 0,
+             etag TEXT,
+             last_modified TEXT,
+             lease_expires_at INTEGER NOT NULL DEFAULT 0,
+             last_checked_at INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS idx_tracked_channels_checked ON tracked_channels(last_checked_at);
+         CREATE INDEX IF NOT EXISTS idx_tracked_channels_lease ON tracked_channels(lease_expires_at);
+
+         CREATE TABLE IF NOT EXISTS user_subscriptions (
+             user_id INTEGER NOT NULL,
+             channel_id TEXT NOT NULL,
+             is_paused INTEGER NOT NULL DEFAULT 0,
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY (user_id, channel_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_user_subs_channel ON user_subscriptions(channel_id);
+         CREATE INDEX IF NOT EXISTS idx_user_subs_user ON user_subscriptions(user_id);
+
+         CREATE TABLE IF NOT EXISTS sent_notifications (
+             user_id INTEGER NOT NULL,
+             video_id TEXT NOT NULL,
+             sent_at INTEGER NOT NULL,
+             PRIMARY KEY (user_id, video_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_sent_notifications_ts ON sent_notifications(sent_at);",
     )?;
     Ok(())
 }
@@ -669,6 +706,204 @@ impl Store {
         // Periodic WAL checkpoints keep the WAL file small.
         self.flush();
     }
+
+    // ================= YouTube Subscriptions & Premium =================
+
+    pub fn is_user_premium(&self, user_id: i64) -> bool {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row("SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1", params![user_id], |r| {
+            let is_prem: i64 = r.get(0)?;
+            let expires: i64 = r.get(1)?;
+            let now = now_secs() as i64;
+            Ok(is_prem != 0 && (expires == 0 || expires > now))
+        })
+        .unwrap_or(false)
+    }
+
+    #[allow(dead_code)]
+    pub fn get_user_premium_info(&self, user_id: i64) -> (bool, u64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row("SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1", params![user_id], |r| {
+            let is_prem: i64 = r.get(0)?;
+            let expires: i64 = r.get(1)?;
+            Ok((is_prem != 0, expires as u64))
+        })
+        .unwrap_or((false, 0))
+    }
+
+    pub fn set_user_premium(&self, user_id: i64, is_premium: bool, expires_at: u64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = conn.execute(
+            "INSERT INTO user_premium (user_id, is_premium, expires_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET is_premium = excluded.is_premium, expires_at = excluded.expires_at",
+            params![user_id, if is_premium { 1 } else { 0 }, expires_at as i64],
+        );
+        if is_premium {
+            let _ = conn.execute("UPDATE user_subscriptions SET is_paused = 0 WHERE user_id = ?1", params![user_id]);
+        }
+    }
+
+    pub fn count_user_subscriptions(&self, user_id: i64) -> usize {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row("SELECT COUNT(*) FROM user_subscriptions WHERE user_id = ?1", params![user_id], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize
+    }
+
+    pub fn get_user_subscriptions(&self, user_id: i64) -> Vec<(String, String)> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT s.channel_id, c.title FROM user_subscriptions s
+             JOIN tracked_channels c ON s.channel_id = c.channel_id
+             WHERE s.user_id = ?1 ORDER BY s.created_at ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![user_id], |r| Ok((r.get(0)?, r.get(1)?)));
+        rows.map(|r| r.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn add_subscription(
+        &self,
+        user_id: i64,
+        channel_id: &str,
+        title: &str,
+        latest_video_id: Option<&str>,
+    ) -> Result<bool, String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+
+        let existed: bool = conn
+            .query_row("SELECT 1 FROM tracked_channels WHERE channel_id = ?1", params![channel_id], |_| Ok(true))
+            .unwrap_or(false);
+
+        conn.execute(
+            "INSERT INTO tracked_channels (channel_id, title, last_video_id, last_checked_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(channel_id) DO UPDATE SET title = CASE WHEN excluded.title != '' THEN excluded.title ELSE tracked_channels.title END",
+            params![channel_id, title, latest_video_id, now],
+        ).map_err(|e| format!("db error: {e}"))?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO user_subscriptions (user_id, channel_id, is_paused, created_at)
+             VALUES (?1, ?2, 0, ?3)",
+            params![user_id, channel_id, now],
+        )
+        .map_err(|e| format!("db error: {e}"))?;
+
+        Ok(!existed)
+    }
+
+    pub fn remove_subscription(&self, user_id: i64, channel_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "DELETE FROM user_subscriptions WHERE user_id = ?1 AND channel_id = ?2",
+            params![user_id, channel_id],
+        )
+        .map_err(|e| format!("db error: {e}"))?;
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_subscriptions WHERE channel_id = ?1", params![channel_id], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
+
+        if remaining == 0 {
+            let _ = conn.execute("DELETE FROM tracked_channels WHERE channel_id = ?1", params![channel_id]);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn get_channel_subscribers(&self, channel_id: &str) -> Vec<i64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+        let mut stmt = match conn.prepare(
+            "SELECT s.user_id FROM user_subscriptions s
+             LEFT JOIN user_premium p ON s.user_id = p.user_id
+             WHERE s.channel_id = ?1 AND s.is_paused = 0
+               AND (p.is_premium = 1 AND (p.expires_at = 0 OR p.expires_at > ?2))",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![channel_id, now], |r| r.get(0));
+        rows.map(|r| r.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn mark_notification_sent(&self, user_id: i64, video_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+        conn.execute(
+            "INSERT INTO sent_notifications (user_id, video_id, sent_at) VALUES (?1, ?2, ?3)",
+            params![user_id, video_id, now],
+        )
+        .is_ok()
+    }
+
+    pub fn pause_user_subscriptions(&self, user_id: i64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = conn.execute("UPDATE user_subscriptions SET is_paused = 1 WHERE user_id = ?1", params![user_id]);
+    }
+
+    pub fn get_next_channel_for_rss(&self) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT channel_id, etag, last_modified, last_video_id FROM tracked_channels
+             ORDER BY last_checked_at ASC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .unwrap_or(None)
+    }
+
+    pub fn touch_channel_checked(&self, channel_id: &str) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+        let _ = conn.execute(
+            "UPDATE tracked_channels SET last_checked_at = ?1 WHERE channel_id = ?2",
+            params![now, channel_id],
+        );
+    }
+
+    pub fn update_channel_rss(
+        &self,
+        channel_id: &str,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        last_video_id: Option<&str>,
+    ) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+        let _ = conn.execute(
+            "UPDATE tracked_channels SET last_checked_at = ?1, etag = ?2, last_modified = ?3,
+             last_video_id = COALESCE(?4, last_video_id)
+             WHERE channel_id = ?5",
+            params![now, etag, last_modified, last_video_id, channel_id],
+        );
+    }
+
+    pub fn get_channels_to_renew(&self, before_timestamp: u64) -> Vec<String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare("SELECT channel_id FROM tracked_channels WHERE lease_expires_at < ?1") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![before_timestamp as i64], |r| r.get(0));
+        rows.map(|r| r.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn update_channel_lease(&self, channel_id: &str, lease_expires_at: u64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = conn.execute(
+            "UPDATE tracked_channels SET lease_expires_at = ?1 WHERE channel_id = ?2",
+            params![lease_expires_at as i64, channel_id],
+        );
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -894,6 +1129,53 @@ mod tests {
 
         // After take_active_jobs, store has no active jobs
         assert!(reloaded.take_active_jobs().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subscriptions_and_premium_lifecycle() {
+        let dir = temp_dir("subs-premium");
+        let store = Store::load(&dir);
+
+        // 1. Premium toggle
+        assert!(!store.is_user_premium(100));
+        store.set_user_premium(100, true, 0);
+        assert!(store.is_user_premium(100));
+
+        // 2. Subscriptions
+        assert_eq!(store.count_user_subscriptions(100), 0);
+        let is_new = store.add_subscription(100, "UC12345", "Test Channel", Some("vid1")).unwrap();
+        assert!(is_new); // first time in system
+        assert_eq!(store.count_user_subscriptions(100), 1);
+
+        // Add second user to same channel
+        store.set_user_premium(200, true, 0);
+        let is_new2 = store.add_subscription(200, "UC12345", "Test Channel", Some("vid1")).unwrap();
+        assert!(!is_new2); // channel already existed in system
+
+        let subscribers = store.get_channel_subscribers("UC12345");
+        assert_eq!(subscribers.len(), 2);
+        assert!(subscribers.contains(&100) && subscribers.contains(&200));
+
+        // 3. Deduplication: mark_notification_sent
+        assert!(store.mark_notification_sent(100, "vid2"));
+        assert!(!store.mark_notification_sent(100, "vid2")); // duplicate returns false!
+
+        // 4. Pause subscriptions on bot block
+        store.pause_user_subscriptions(100);
+        let active_subs = store.get_channel_subscribers("UC12345");
+        assert_eq!(active_subs, vec![200]); // 100 is paused, only 200 is returned
+
+        // Unpause on premium re-set
+        store.set_user_premium(100, true, 0);
+        assert_eq!(store.get_channel_subscribers("UC12345").len(), 2);
+
+        // 5. Unsubscribe
+        let last_left1 = store.remove_subscription(100, "UC12345").unwrap();
+        assert!(!last_left1); // 200 still subscribed
+        let last_left2 = store.remove_subscription(200, "UC12345").unwrap();
+        assert!(last_left2); // 0 subscribers left, returns true for WebSub unsubscription!
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

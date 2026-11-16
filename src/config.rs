@@ -76,6 +76,13 @@ pub struct Config {
     pub ytdlp_extra_args: Vec<String>,
     pub ytdlp_update_cmd: Option<String>,
     pub ytdlp_update_hours: u64,
+
+    pub subs_enabled: bool,
+    pub websub_public_url: Option<String>,
+    pub websub_bind_addr: String,
+    pub websub_secret: Option<String>,
+    pub premium_limit: usize,
+    pub rss_check_interval_secs: u64,
 }
 
 /// Process environment layered over a `.env` file (real env wins).
@@ -250,6 +257,13 @@ impl Config {
                 .unwrap_or_default(),
             ytdlp_update_cmd: env.get("YTDLP_UPDATE_CMD"),
             ytdlp_update_hours: env.num("YTDLP_UPDATE_INTERVAL_HOURS", 24u64)?.max(1),
+
+            subs_enabled: env.flag("SUBSCRIPTIONS_ENABLED", true),
+            websub_public_url: env.get("WEBSUB_URL"),
+            websub_bind_addr: env.get("WEBSUB_BIND").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
+            websub_secret: env.get("WEBSUB_SECRET"),
+            premium_limit: env.num("PREMIUM_CHANNEL_LIMIT", 25usize)?.clamp(1, 1000),
+            rss_check_interval_secs: env.num("RSS_CHECK_INTERVAL_SECS", 4u64)?.clamp(1, 300),
         })
     }
 

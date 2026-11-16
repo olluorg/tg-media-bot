@@ -113,6 +113,8 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud і ще
     c_minimal: "Мінімальний інтерфейс: on|off",
     c_topic: "Працювати в одній темі: lock|unlock|status",
     c_lang: "Мова",
+    c_premium: "Преміум статус та підписки",
+    c_subscriptions: "Керування підписками на канали",
     caption_credit: "📥 Завантажено через @{bot}",
     inline_not_found_title: "Медіа ще немає в кеші",
     inline_not_found_desc: "Натисніть кнопку нижче, щоб завантажити його в боті",
