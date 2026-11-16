@@ -401,6 +401,36 @@ impl Bot {
         }
     }
 
+    /// Edit a media message's media, caption, and inline keyboard.
+    pub async fn edit_message_media(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        media_type: &str,
+        media_url: &str,
+        caption: &str,
+        markup: Option<Value>,
+    ) -> Result<(), TgError> {
+        let mut body = json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "media": {
+                "type": media_type,
+                "media": media_url,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }
+        });
+        if let Some(m) = markup {
+            body["reply_markup"] = m;
+        }
+        match self.call::<IgnoredAny>("editMessageMedia", &body, SHORT_TIMEOUT).await {
+            Ok(_) => Ok(()),
+            Err(TgError::Api { desc, .. }) if desc.contains("message is not modified") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), TgError> {
         let body = json!({ "chat_id": chat_id, "message_id": message_id });
         for _ in 0..=3 {

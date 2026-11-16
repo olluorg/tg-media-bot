@@ -28,6 +28,7 @@ pub struct SearchItem {
 }
 
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 struct RawEntry {
     pub id: Option<String>,
     pub url: Option<String>,
@@ -40,6 +41,7 @@ struct RawEntry {
 }
 
 #[derive(Deserialize, Debug)]
+#[allow(dead_code)]
 struct RawThumb {
     pub url: Option<String>,
 }
@@ -135,10 +137,10 @@ pub async fn search_youtube(
                         "".to_string()
                     }
                 });
-                let thumb_url = raw
-                    .thumbnails
-                    .and_then(|t| t.into_iter().rev().find_map(|x| x.url))
-                    .or_else(|| Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")));
+                // Telegram sendPhoto/editMessageMedia requires JPEG or PNG.
+                // YouTube's dynamic thumbnails (e.g. hq720.jpg?sqp=...) return image/webp,
+                // which Telegram rejects. hqdefault.jpg is guaranteed to return image/jpeg.
+                let thumb_url = Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
 
                 items.push(SearchItem { id, url, title, uploader, duration_secs, duration_str, thumb_url });
             }

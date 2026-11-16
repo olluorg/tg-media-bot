@@ -370,6 +370,100 @@ async fn handle_channel_subscription_request(app: &Arc<App>, ctx: &Ctx, url: &st
     }
 }
 
+#[derive(Clone)]
+struct CardSession {
+    created_at: std::time::Instant,
+    items: Vec<crate::search::SearchItem>,
+    msg_ids: Vec<i64>,
+    prefix: &'static str,
+    lang: Lang,
+}
+
+static CARD_SESSIONS: std::sync::Mutex<Option<std::collections::HashMap<String, CardSession>>> =
+    std::sync::Mutex::new(None);
+static SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+const CARD_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(900);
+
+fn new_session_token() -> String {
+    let n = SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mix = (n.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ crate::state::now_secs()) & 0xFF_FFFF;
+    format!("{:06x}", mix)
+}
+
+fn save_card_session(token: String, session: CardSession) {
+    if let Ok(mut guard) = CARD_SESSIONS.lock() {
+        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+        if map.len() > 100 {
+            map.retain(|_, s| s.created_at.elapsed() < CARD_SESSION_TTL);
+        }
+        map.insert(token, session);
+    }
+}
+
+fn get_card_session(token: &str) -> Option<CardSession> {
+    let mut guard = CARD_SESSIONS.lock().ok()?;
+    let map = guard.as_mut()?;
+    if let Some(session) = map.get(token) {
+        if session.created_at.elapsed() < CARD_SESSION_TTL {
+            return Some(session.clone());
+        }
+    }
+    None
+}
+
+fn render_card_content(item: &crate::search::SearchItem) -> (String, String) {
+    let dur =
+        if !item.duration_str.is_empty() { format!(" • ⏱ <b>{}</b>", item.duration_str) } else { String::new() };
+    let caption = format!(
+        "🎬 <a href=\"{}\"><b>{}</b></a>\n👤 <i>{}</i>{}\n",
+        item.url,
+        util::html_escape(&item.title),
+        util::html_escape(&item.uploader),
+        dur
+    );
+    let thumb_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", item.id);
+    (caption, thumb_url)
+}
+
+fn render_card_markup(
+    item: &crate::search::SearchItem,
+    lang: Lang,
+    page_nav: Option<(usize, usize, &str, &str)>,
+) -> Value {
+    let (dl_video_btn, dl_audio_btn, comm_btn) = match lang {
+        Lang::Ru => ("🎬 Скачать", "🎵 MP3", "💬 Комментарии"),
+        Lang::Uk => ("🎬 Завантажити", "🎵 MP3", "💬 Коментарі"),
+        Lang::Es => ("🎬 Descargar", "🎵 MP3", "💬 Comentarios"),
+        _ => ("🎬 Download", "🎵 MP3", "💬 Comments"),
+    };
+
+    let mut rows = vec![
+        vec![
+            json!({ "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) }),
+            json!({ "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.id) }),
+        ],
+        vec![
+            json!({ "text": comm_btn, "callback_data": format!("comm:{}:0", item.id) }),
+            json!({ "text": "✖️", "callback_data": "del" }),
+        ],
+    ];
+
+    if let Some((page, total_pages, prefix, token)) = page_nav {
+        if total_pages > 1 {
+            let prev_page = if page > 0 { page - 1 } else { total_pages - 1 };
+            let next_page = if page + 1 < total_pages { page + 1 } else { 0 };
+
+            rows.push(vec![
+                json!({ "text": "◀️", "callback_data": format!("{prefix}:p:{prev_page}:{token}") }),
+                json!({ "text": format!("{}/{}", page + 1, total_pages), "callback_data": "noop" }),
+                json!({ "text": "▶️", "callback_data": format!("{prefix}:p:{next_page}:{token}") }),
+            ]);
+        }
+    }
+
+    json!({ "inline_keyboard": rows })
+}
+
 async fn handle_search_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, args: &str) {
     let user_id = ctx.user;
     let (chat, thread) = (ctx.chat, ctx.thread);
@@ -433,7 +527,7 @@ async fn handle_search_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, args: &
     let sent = app.bot.send_message(chat, thread, &searching_text, None, Some(msg.message_id)).await;
     let status_msg_id = sent.ok().map(|m| m.message_id);
 
-    let results = crate::search::search_youtube(&app.cfg, &app.search_slots, query, 3).await;
+    let results = crate::search::search_youtube(&app.cfg, &app.search_slots, query, 9).await;
 
     match results {
         Ok(items) if !items.is_empty() => {
@@ -441,50 +535,34 @@ async fn handle_search_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, args: &
                 let _ = app.bot.delete_message(chat, msg_id).await;
             }
 
-            let (dl_video_btn, dl_audio_btn, comm_btn) = match lang {
-                Lang::Ru => ("🎬 Скачать", "🎵 MP3", "💬 Комментарии"),
-                Lang::Uk => ("🎬 Завантажити", "🎵 MP3", "💬 Коментарі"),
-                Lang::Es => ("🎬 Descargar", "🎵 MP3", "💬 Comentarios"),
-                _ => ("🎬 Download", "🎵 MP3", "💬 Comments"),
-            };
+            let token = new_session_token();
+            let total_pages = (items.len() + 2) / 3;
+            let page_0_items: Vec<_> = items.iter().take(3).collect();
+            let count = page_0_items.len();
+            let mut sent_msg_ids = Vec::new();
 
-            for item in items {
-                let dur = if !item.duration_str.is_empty() {
-                    format!(" • ⏱ <b>{}</b>", item.duration_str)
-                } else {
-                    String::new()
-                };
+            for (idx, item) in page_0_items.into_iter().enumerate() {
+                let (caption, thumb_url) = render_card_content(item);
+                let is_last = idx == count - 1;
+                let page_nav = if is_last { Some((0, total_pages, "s", token.as_str())) } else { None };
+                let markup = render_card_markup(item, lang, page_nav);
 
-                let caption = format!(
-                    "🎬 <a href=\"{}\"><b>{}</b></a>\n👤 <i>{}</i>{}\n",
-                    item.url,
-                    util::html_escape(&item.title),
-                    util::html_escape(&item.uploader),
-                    dur
-                );
-
-                let markup = json!({
-                    "inline_keyboard": [
-                        [
-                            { "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) },
-                            { "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.id) }
-                        ],
-                        [
-                            { "text": comm_btn, "callback_data": format!("comm:{}:0", item.id) },
-                            { "text": "✖️", "callback_data": "del" }
-                        ]
-                    ]
-                });
-
-                let thumb_url = item
-                    .thumb_url
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", item.id));
-
-                if app.bot.send_photo(chat, thread, &thumb_url, &caption, Some(markup.clone()), None).await.is_err() {
-                    let _ = app.bot.send_message(chat, thread, &caption, Some(markup), None).await;
+                match app.bot.send_photo(chat, thread, &thumb_url, &caption, Some(markup.clone()), None).await {
+                    Ok(sent_msg) => {
+                        sent_msg_ids.push(sent_msg.message_id);
+                    }
+                    Err(_) => {
+                        if let Ok(sent_msg) = app.bot.send_message(chat, thread, &caption, Some(markup), None).await {
+                            sent_msg_ids.push(sent_msg.message_id);
+                        }
+                    }
                 }
             }
+
+            save_card_session(
+                token,
+                CardSession { created_at: std::time::Instant::now(), items, msg_ids: sent_msg_ids, prefix: "s", lang },
+            );
         }
         Ok(_) => {
             let not_found = match lang {
@@ -1581,43 +1659,40 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
 
                     tokio::spawn(async move {
                         let http = reqwest::Client::new();
-                        match crate::subs::resolver::fetch_channel_latest_videos(&http, &ch_id, 3).await {
+                        // Fetch up to 9 latest videos (3 pages of 3)
+                        match crate::subs::resolver::fetch_channel_latest_videos(&http, &ch_id, 9).await {
                             Ok((channel_title, entries)) if !entries.is_empty() => {
                                 if let Some(mid) = status_mid {
                                     let _ = app_clone.bot.delete_message(chat_id, mid).await;
                                 }
 
-                                let (dl_video_btn, dl_audio_btn, comm_btn) = match lang {
-                                    Lang::Ru => ("🎬 Скачать", "🎵 MP3", "💬 Комментарии"),
-                                    Lang::Uk => ("🎬 Завантажити", "🎵 MP3", "💬 Коментарі"),
-                                    Lang::Es => ("🎬 Descargar", "🎵 MP3", "💬 Comentarios"),
-                                    _ => ("🎬 Download", "🎵 MP3", "💬 Comments"),
-                                };
+                                let items: Vec<crate::search::SearchItem> = entries
+                                    .into_iter()
+                                    .map(|e| crate::search::SearchItem {
+                                        id: e.video_id.clone(),
+                                        url: e.link,
+                                        title: e.title,
+                                        uploader: channel_title.clone(),
+                                        duration_secs: 0,
+                                        duration_str: String::new(),
+                                        thumb_url: Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", e.video_id)),
+                                    })
+                                    .collect();
 
-                                for item in entries {
-                                    let caption = format!(
-                                        "🎬 <a href=\"{}\"><b>{}</b></a>\n👤 <i>{}</i>\n",
-                                        item.link,
-                                        util::html_escape(&item.title),
-                                        util::html_escape(&channel_title)
-                                    );
+                                let token = new_session_token();
+                                let total_pages = (items.len() + 2) / 3;
+                                let page_0_items: Vec<_> = items.iter().take(3).collect();
+                                let count = page_0_items.len();
+                                let mut sent_msg_ids = Vec::new();
 
-                                    let markup = json!({
-                                        "inline_keyboard": [
-                                            [
-                                                { "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.video_id) },
-                                                { "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.video_id) }
-                                            ],
-                                            [
-                                                { "text": comm_btn, "callback_data": format!("comm:{}:0", item.video_id) },
-                                                { "text": "✖️", "callback_data": "del" }
-                                            ]
-                                        ]
-                                    });
+                                for (idx, item) in page_0_items.into_iter().enumerate() {
+                                    let (caption, thumb_url) = render_card_content(item);
+                                    let is_last = idx == count - 1;
+                                    let page_nav =
+                                        if is_last { Some((0, total_pages, "sub", token.as_str())) } else { None };
+                                    let markup = render_card_markup(item, lang, page_nav);
 
-                                    let thumb_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", item.video_id);
-
-                                    if app_clone
+                                    match app_clone
                                         .bot
                                         .send_photo(
                                             chat_id,
@@ -1628,14 +1703,32 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                                             None,
                                         )
                                         .await
-                                        .is_err()
                                     {
-                                        let _ = app_clone
-                                            .bot
-                                            .send_message(chat_id, thread_id, &caption, Some(markup), None)
-                                            .await;
+                                        Ok(sent_msg) => {
+                                            sent_msg_ids.push(sent_msg.message_id);
+                                        }
+                                        Err(_) => {
+                                            if let Ok(sent_msg) = app_clone
+                                                .bot
+                                                .send_message(chat_id, thread_id, &caption, Some(markup), None)
+                                                .await
+                                            {
+                                                sent_msg_ids.push(sent_msg.message_id);
+                                            }
+                                        }
                                     }
                                 }
+
+                                save_card_session(
+                                    token,
+                                    CardSession {
+                                        created_at: std::time::Instant::now(),
+                                        items,
+                                        msg_ids: sent_msg_ids,
+                                        prefix: "sub",
+                                        lang,
+                                    },
+                                );
                             }
                             Ok(_) => {
                                 let empty_text = match lang {
@@ -1662,6 +1755,51 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                             }
                         }
                     });
+                }
+                ["p", page_str, token] => {
+                    let page: usize = page_str.parse().unwrap_or(0);
+                    let session = match get_card_session(token) {
+                        Some(s) => s,
+                        None => {
+                            let alert = match lang {
+                                Lang::Ru => "⚠️ Время сессии поиска истекло. Повторите запрос.",
+                                Lang::Uk => "⚠️ Час сесії пошуку минув. Повторіть запит.",
+                                Lang::Es => "⚠️ La sesión de búsqueda ha expirado. Repite la consulta.",
+                                _ => "⚠️ Search session expired. Please search again.",
+                            };
+                            app.bot.answer_callback(&cb.id, Some(alert), false).await;
+                            return;
+                        }
+                    };
+
+                    app.bot.answer_callback(&cb.id, None, false).await;
+
+                    let items = &session.items;
+                    let total_pages = (items.len() + 2) / 3;
+                    if page >= total_pages {
+                        return;
+                    }
+
+                    let start_idx = page * 3;
+                    let page_items: Vec<_> = items.iter().skip(start_idx).take(3).collect();
+                    let num_page_items = page_items.len();
+                    let chat_id = msg.chat.id;
+
+                    for (idx, &mid) in session.msg_ids.iter().enumerate() {
+                        if idx < num_page_items {
+                            let item = page_items[idx];
+                            let (caption, thumb_url) = render_card_content(item);
+                            let is_last = idx == num_page_items - 1;
+                            let page_nav =
+                                if is_last { Some((page, total_pages, session.prefix, *token)) } else { None };
+                            let markup = render_card_markup(item, session.lang, page_nav);
+
+                            let _ = app
+                                .bot
+                                .edit_message_media(chat_id, mid, "photo", &thumb_url, &caption, Some(markup))
+                                .await;
+                        }
+                    }
                 }
                 _ => {
                     app.bot.answer_callback(&cb.id, None, false).await;
