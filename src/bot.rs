@@ -208,12 +208,22 @@ fn subscriptions_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
 
     let header = match lang {
         Lang::Ru => format!(
-            "📺 <b>Ваши подписки ({}/{}):</b>\n<i>Нажмите на кнопку с каналом, чтобы отписаться</i>",
+            "📺 <b>Ваши подписки ({}/{}):</b>\n• Нажмите 🎬, чтобы посмотреть последние видео\n• Нажмите ❌, чтобы отписаться",
+            subs.len(),
+            limit
+        ),
+        Lang::Uk => format!(
+            "📺 <b>Ваші підписки ({}/{}):</b>\n• Натисніть 🎬, щоб подивитися останні відео\n• Натисніть ❌, щоб відписатися",
+            subs.len(),
+            limit
+        ),
+        Lang::Es => format!(
+            "📺 <b>Tus suscripciones ({}/{}):</b>\n• Haz clic en 🎬 para ver los últimos videos\n• Haz clic en ❌ para cancelar suscripción",
             subs.len(),
             limit
         ),
         _ => format!(
-            "📺 <b>Your subscriptions ({}/{}):</b>\n<i>Click a channel button to unsubscribe</i>",
+            "📺 <b>Your subscriptions ({}/{}):</b>\n• Click 🎬 to view latest channel videos\n• Click ❌ to unsubscribe",
             subs.len(),
             limit
         ),
@@ -221,11 +231,17 @@ fn subscriptions_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
 
     let mut buttons = Vec::new();
     for (channel_id, title) in subs {
-        let label = format!("❌ {}", util::truncate_chars(&title, 25));
-        buttons.push(vec![json!({
-            "text": label,
-            "callback_data": format!("sub:unsub:{}", channel_id)
-        })]);
+        let label = format!("🎬 {}", util::truncate_chars(&title, 22));
+        buttons.push(vec![
+            json!({
+                "text": label,
+                "callback_data": format!("sub:vid:{}", channel_id)
+            }),
+            json!({
+                "text": "❌",
+                "callback_data": format!("sub:unsub:{}", channel_id)
+            }),
+        ]);
     }
 
     (header, json!({ "inline_keyboard": buttons }))
@@ -1545,6 +1561,107 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
 
                     let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: cb.from.id, lang };
                     enqueue_all(app, &ctx, vec![video_url], quality, None, None).await;
+                }
+                ["vid", channel_id] => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    let loading = match lang {
+                        Lang::Ru => "📺 <i>Загружаю последние видео канала...</i>",
+                        Lang::Uk => "📺 <i>Завантажую останні відео каналу...</i>",
+                        Lang::Es => "📺 <i>Cargando últimos videos del canal...</i>",
+                        _ => "📺 <i>Loading latest channel videos...</i>",
+                    };
+                    let status_msg =
+                        app.bot.send_message(msg.chat.id, msg.thread(), loading, None, Some(msg.message_id)).await.ok();
+                    let status_mid = status_msg.map(|m| m.message_id);
+
+                    let app_clone = app.clone();
+                    let ch_id = channel_id.to_string();
+                    let chat_id = msg.chat.id;
+                    let thread_id = msg.thread();
+
+                    tokio::spawn(async move {
+                        let http = reqwest::Client::new();
+                        match crate::subs::resolver::fetch_channel_latest_videos(&http, &ch_id, 3).await {
+                            Ok((channel_title, entries)) if !entries.is_empty() => {
+                                if let Some(mid) = status_mid {
+                                    let _ = app_clone.bot.delete_message(chat_id, mid).await;
+                                }
+
+                                let (dl_video_btn, dl_audio_btn, comm_btn) = match lang {
+                                    Lang::Ru => ("🎬 Скачать", "🎵 MP3", "💬 Комментарии"),
+                                    Lang::Uk => ("🎬 Завантажити", "🎵 MP3", "💬 Коментарі"),
+                                    Lang::Es => ("🎬 Descargar", "🎵 MP3", "💬 Comentarios"),
+                                    _ => ("🎬 Download", "🎵 MP3", "💬 Comments"),
+                                };
+
+                                for item in entries {
+                                    let caption = format!(
+                                        "🎬 <a href=\"{}\"><b>{}</b></a>\n👤 <i>{}</i>\n",
+                                        item.link,
+                                        util::html_escape(&item.title),
+                                        util::html_escape(&channel_title)
+                                    );
+
+                                    let markup = json!({
+                                        "inline_keyboard": [
+                                            [
+                                                { "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.video_id) },
+                                                { "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.video_id) }
+                                            ],
+                                            [
+                                                { "text": comm_btn, "callback_data": format!("comm:{}:0", item.video_id) },
+                                                { "text": "✖️", "callback_data": "del" }
+                                            ]
+                                        ]
+                                    });
+
+                                    let thumb_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", item.video_id);
+
+                                    if app_clone
+                                        .bot
+                                        .send_photo(
+                                            chat_id,
+                                            thread_id,
+                                            &thumb_url,
+                                            &caption,
+                                            Some(markup.clone()),
+                                            None,
+                                        )
+                                        .await
+                                        .is_err()
+                                    {
+                                        let _ = app_clone
+                                            .bot
+                                            .send_message(chat_id, thread_id, &caption, Some(markup), None)
+                                            .await;
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                let empty_text = match lang {
+                                    Lang::Ru => "ℹ️ У этого канала пока нет опубликованных видео.",
+                                    Lang::Uk => "ℹ️ У цього каналу поки немає опублікованих відео.",
+                                    Lang::Es => "ℹ️ Este canal aún no tiene videos publicados.",
+                                    _ => "ℹ️ No published videos found for this channel.",
+                                };
+                                if let Some(mid) = status_mid {
+                                    let _ = app_clone.bot.edit_message(chat_id, mid, empty_text, None).await;
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("fetch channel latest videos failed: {e}");
+                                let err_text = match lang {
+                                    Lang::Ru => "⚠️ Не удалось загрузить видео канала. Попробуйте позже.",
+                                    Lang::Uk => "⚠️ Не вдалося завантажити відео каналу. Спробуйте пізніше.",
+                                    Lang::Es => "⚠️ Error al cargar los videos del canal. Inténtalo más tarde.",
+                                    _ => "⚠️ Failed to fetch channel videos. Please try again later.",
+                                };
+                                if let Some(mid) = status_mid {
+                                    let _ = app_clone.bot.edit_message(chat_id, mid, err_text, None).await;
+                                }
+                            }
+                        }
+                    });
                 }
                 _ => {
                     app.bot.answer_callback(&cb.id, None, false).await;

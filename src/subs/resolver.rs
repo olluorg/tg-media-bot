@@ -124,6 +124,30 @@ pub async fn fetch_channel_info_from_rss(http: &reqwest::Client, channel_id: &st
     })
 }
 
+/// Fetches the channel's latest N videos from its RSS feed.
+pub async fn fetch_channel_latest_videos(
+    http: &reqwest::Client,
+    channel_id: &str,
+    limit: usize,
+) -> Result<(String, Vec<FeedEntry>), String> {
+    let feed_url = format!("https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}");
+    let resp = http
+        .get(&feed_url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("failed to fetch RSS feed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("RSS feed returned status {}", resp.status()));
+    }
+
+    let xml = resp.text().await.map_err(|e| format!("failed to read RSS feed: {e}"))?;
+    let (title, entries) = parse_feed(&xml)?;
+    let limited = entries.into_iter().take(limit).collect();
+    Ok((if title.is_empty() { channel_id.to_string() } else { title }, limited))
+}
+
 /// Parses a YouTube Atom feed string into (channel_title, Vec<FeedEntry>).
 pub fn parse_feed(xml: &str) -> Result<(String, Vec<FeedEntry>), String> {
     // Channel title is usually in the top <title>...</title> before any <entry>
