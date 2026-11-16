@@ -1120,7 +1120,7 @@ mod tests {
         assert_eq!(sparkline(&[0, 0, 0]), "   ");
         let s = sparkline(&[10, 50, 100]);
         assert_eq!(s.chars().count(), 3);
-        assert!(s.chars().nth(0).unwrap() < s.chars().nth(2).unwrap());
+        assert!(s.chars().next().unwrap() < s.chars().nth(2).unwrap());
     }
 
     #[test]
