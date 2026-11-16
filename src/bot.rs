@@ -1019,10 +1019,8 @@ async fn handle_inline_query(app: &Arc<App>, iq: InlineQuery) {
     }
 
     let video_key = cachekey::video_key(&url);
-    let mut candidate_keys = vec![
-        cachekey::request_key(&video_key, Quality::Max),
-        cachekey::delivered_key(&video_key, Kind::Video, None),
-    ];
+    let mut candidate_keys =
+        vec![cachekey::request_key(&video_key, Quality::Max), cachekey::delivered_key(&video_key, Kind::Video, None)];
     for &h in &Quality::HEIGHTS {
         candidate_keys.push(cachekey::request_key(&video_key, Quality::Height(h)));
         candidate_keys.push(cachekey::delivered_key(&video_key, Kind::Video, Some(h)));
@@ -1031,8 +1029,7 @@ async fn handle_inline_query(app: &Arc<App>, iq: InlineQuery) {
     candidate_keys.push(cachekey::delivered_key(&video_key, Kind::Audio, None));
 
     if let Some(entry) = app.store.cache_find(&candidate_keys) {
-        let credit = (!app.bot.username.is_empty())
-            .then(|| fill(t.caption_credit, &[("bot", &app.bot.username)]));
+        let credit = (!app.bot.username.is_empty()).then(|| fill(t.caption_credit, &[("bot", &app.bot.username)]));
         let caption = crate::app::build_caption(&entry.title, &url, credit.as_deref());
         let result = match entry.kind.as_str() {
             "audio" => json!({

@@ -1053,9 +1053,8 @@ impl App {
             "audio" => MediaKind::Audio,
             _ => MediaKind::Document,
         };
-        let credit = (!self.bot.username.is_empty()).then(|| {
-            fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)])
-        });
+        let credit =
+            (!self.bot.username.is_empty()).then(|| fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)]));
         let caption = (!job.minimal).then(|| build_caption(&entry.title, &job.url, credit.as_deref()));
         let media = Media {
             kind,
@@ -1082,9 +1081,8 @@ impl App {
     }
 
     async fn upload(&self, job: &Job, ready: &Ready) -> Result<Message, TgError> {
-        let credit = (!self.bot.username.is_empty()).then(|| {
-            fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)])
-        });
+        let credit =
+            (!self.bot.username.is_empty()).then(|| fill(job.lang.t().caption_credit, &[("bot", &self.bot.username)]));
         let caption = (!job.minimal).then(|| build_caption(&ready.title, &job.url, credit.as_deref()));
         let source = if self.cfg.local_api_files { Source::LocalUri(&ready.path) } else { Source::Upload(&ready.path) };
         let mut media = Media {
@@ -1406,10 +1404,7 @@ mod tests {
 
         // With attribution
         let credited = build_caption("Cute Cat", "https://x.com/cat", Some("📥 via @samplebot"));
-        assert_eq!(
-            credited,
-            "Cute Cat\n\n<code>https://x.com/cat</code>\n\n📥 via @samplebot"
-        );
+        assert_eq!(credited, "Cute Cat\n\n<code>https://x.com/cat</code>\n\n📥 via @samplebot");
         let long_credited = build_caption(&long, "https://x.com/v", Some("📥 via @samplebot"));
         let visible_cred = long_credited.replace("<code>", "").replace("</code>", "");
         assert!(visible_cred.chars().count() <= CAPTION_MAX);
