@@ -130,6 +130,7 @@ pub struct Message {
     pub video: Option<FileRef>,
     pub audio: Option<FileRef>,
     pub document: Option<FileRef>,
+    pub successful_payment: Option<SuccessfulPayment>,
 }
 
 impl Message {
@@ -161,11 +162,32 @@ pub struct InlineQuery {
     pub offset: String,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct SuccessfulPayment {
+    pub currency: String,
+    pub total_amount: u64,
+    pub invoice_payload: String,
+    #[serde(default)]
+    pub telegram_payment_charge_id: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct PreCheckoutQuery {
+    pub id: String,
+    pub from: User,
+    pub currency: String,
+    pub total_amount: u64,
+    pub invoice_payload: String,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct Update {
     pub message: Option<Message>,
     pub callback_query: Option<CallbackQuery>,
     pub inline_query: Option<InlineQuery>,
+    pub pre_checkout_query: Option<PreCheckoutQuery>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -275,7 +297,7 @@ impl Bot {
             "offset": offset,
             "timeout": wait_secs,
             "limit": 50,
-            "allowed_updates": ["message", "callback_query", "inline_query"],
+            "allowed_updates": ["message", "callback_query", "inline_query", "pre_checkout_query"],
         });
         let raw: Vec<Value> = self.call("getUpdates", &body, Duration::from_secs(wait_secs + 15)).await?;
         let mut next = offset;
@@ -590,6 +612,45 @@ impl Bot {
 
         let req = self.http.post(format!("{}/{}", self.base, m.kind.method())).multipart(form).timeout(timeout);
         Self::finish(req.send().await).await
+    }
+
+    /// Send an invoice (for Telegram Stars, currency is "XTR" and provider_token is "").
+    pub async fn send_invoice(
+        &self,
+        chat_id: i64,
+        title: &str,
+        description: &str,
+        payload: &str,
+        currency: &str,
+        prices: &[Value],
+    ) -> Result<Message, TgError> {
+        let body = json!({
+            "chat_id": chat_id,
+            "title": title,
+            "description": description,
+            "payload": payload,
+            "currency": currency,
+            "provider_token": "",
+            "prices": prices,
+        });
+        self.call("sendInvoice", &body, SHORT_TIMEOUT).await
+    }
+
+    /// Answer a pre-checkout query (required within 10s of receiving it).
+    pub async fn answer_pre_checkout_query(
+        &self,
+        pre_checkout_query_id: &str,
+        ok: bool,
+        error_message: Option<&str>,
+    ) -> Result<bool, TgError> {
+        let mut body = json!({
+            "pre_checkout_query_id": pre_checkout_query_id,
+            "ok": ok,
+        });
+        if let Some(err) = error_message {
+            body["error_message"] = Value::String(err.to_string());
+        }
+        self.call("answerPreCheckoutQuery", &body, SHORT_TIMEOUT).await
     }
 }
 

@@ -116,6 +116,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud и ещ
     c_lang: "Язык",
     c_premium: "Премиум статус и подписки",
     c_subscriptions: "Управление подписками на каналы",
+    c_promo: "Активация промокода",
     caption_credit: "📥 Скачано через @{bot}",
     inline_not_found_title: "Медиа еще нет в кэше",
     inline_not_found_desc: "Нажмите кнопку ниже, чтобы скачать его в боте",

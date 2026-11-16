@@ -46,7 +46,7 @@ services:
 
   bot:
     build: .
-    image: tg-media-bot:local
+    image: ghcr.io/olluorg/tg-media-bot:latest
     env_file: .env
     environment:
       API_SERVER_URL: http://telegram-bot-api:8081

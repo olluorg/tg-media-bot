@@ -116,6 +116,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     c_lang: "Language",
     c_premium: "Premium status and subscriptions",
     c_subscriptions: "Manage channel subscriptions",
+    c_promo: "Activate promocode",
     caption_credit: "📥 via @{bot}",
     inline_not_found_title: "Media not in cache yet",
     inline_not_found_desc: "Click the button below to download it in bot",

@@ -221,6 +221,14 @@ async fn daily_digest_loop(app: Arc<App>) {
     }
 }
 
+async fn premium_expiry_loop(app: Arc<App>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(900));
+    loop {
+        interval.tick().await;
+        bot::check_and_notify_expiring_premium(&app).await;
+    }
+}
+
 async fn run(cfg: Config) -> i32 {
     let stats = match prepare_dirs(&cfg) {
         Ok(s) => s,
@@ -279,6 +287,7 @@ async fn run(cfg: Config) -> i32 {
     tokio::spawn(housekeeping(app.clone()));
     tokio::spawn(updater(app.clone()));
     tokio::spawn(daily_digest_loop(app.clone()));
+    tokio::spawn(premium_expiry_loop(app.clone()));
     subs::start_subscription_subsystem(app.clone());
 
     // Recover interrupted jobs from previous run / crash

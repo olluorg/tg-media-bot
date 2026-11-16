@@ -25,6 +25,7 @@ pub fn command_list(t: &Strings) -> Vec<(&'static str, &'static str)> {
         ("help", t.c_help),
         ("search", t.c_search),
         ("premium", t.c_premium),
+        ("promo", t.c_promo),
         ("subscriptions", t.c_subscriptions),
         ("quality", t.c_quality),
         ("status", t.c_status),
@@ -107,78 +108,196 @@ fn top_keyboard(current_days: u64) -> Value {
 }
 
 fn premium_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
-    let is_premium = app.store.is_user_premium(user_id);
+    let (is_premium, expires_at) = app.store.get_user_premium_info(user_id);
     let sub_count = app.store.count_user_subscriptions(user_id);
     let limit = app.cfg.premium_limit;
+    let has_welcome = app.store.has_user_activated_welcome(user_id);
 
-    let (text, btn_text, action) = match lang {
+    let expiry_str = if expires_at == 0 {
+        match lang {
+            Lang::Ru => "бессрочно".to_string(),
+            Lang::Uk => "безстроково".to_string(),
+            Lang::Es => "permanente".to_string(),
+            _ => "permanent".to_string(),
+        }
+    } else {
+        crate::util::format_date_str(expires_at as i64)
+    };
+
+    let text = match lang {
         Lang::Ru => {
             if is_premium {
-                (
-                    format!(
-                        "✨ <b>Ваш статус: Premium активен</b>\n\n\
-                         🔍 Поиск видео: <b>активен</b> (/search или текст в чате)\n\
-                         📺 Отслеживание каналов: <b>{sub_count}/{limit}</b>\n\
-                         Бот присылает новые видео с подписок и позволяет искать любые видео на YouTube.",
-                    ),
-                    "Отключить Premium",
-                    "pr:off",
+                format!(
+                    "✨ <b>Ваш статус: Premium активен</b> (до {expiry_str})\n\n\
+                     🔍 Поиск видео: <b>активен</b> (/search или текст в чате)\n\
+                     💬 Чтение комментариев: <b>активно</b>\n\
+                     📺 Отслеживание каналов: <b>{sub_count}/{limit}</b>\n\n\
+                     <i>Вы можете продлить подписку звёздами Telegram Stars или промокодом ниже:</i>",
                 )
             } else {
-                (
-                    format!(
-                        "⭐ <b>Подписка Premium</b>\n\n\
-                         С Premium вам доступны эксклюзивные функции:\n\
-                         • 🔍 <b>Поиск видео по названию</b> через /search и в инлайн-режиме\n\
-                         • 💬 <b>Топ-комментарии к видео</b> с удобной пагинацией\n\
-                         • 📺 <b>Отслеживание YouTube-каналов</b> (до {limit} каналов)\n\
-                         • ⚡ <b>Мгновенные уведомления</b> о новых видео\n\
-                         • 📥 <b>Скачивание видео и MP3</b> в 1 клик\n\n\
-                         <i>Пока идет тестирование, Premium можно активировать бесплатно:</i>",
-                    ),
-                    "✨ Активировать тестовый Premium",
-                    "pr:on",
+                format!(
+                    "⭐ <b>Подписка Premium</b>\n\n\
+                     С Premium вам доступны эксклюзивные функции:\n\
+                     • 🔍 <b>Поиск видео по названию</b> через /search и в инлайн-режиме\n\
+                     • 💬 <b>Топ-комментарии к видео</b> с удобной пагинацией\n\
+                     • 📺 <b>Отслеживание YouTube-каналов</b> (до {limit} каналов)\n\
+                     • ⚡ <b>Мгновенные уведомления</b> о новых видео\n\
+                     • 📥 <b>Скачивание видео и MP3</b> в 1 клик\n\n\
+                     Выберите вариант подключения ниже:",
+                )
+            }
+        }
+        Lang::Uk => {
+            if is_premium {
+                format!(
+                    "✨ <b>Ваш статус: Premium активний</b> (до {expiry_str})\n\n\
+                     🔍 Пошук відео: <b>активний</b> (/search або текст у чаті)\n\
+                     💬 Читання коментарів: <b>активно</b>\n\
+                     📺 Відстеження каналів: <b>{sub_count}/{limit}</b>\n\n\
+                     <i>Ви можете подовжити підписку зірками Telegram Stars або промокодом:</i>",
+                )
+            } else {
+                format!(
+                    "⭐ <b>Підписка Premium</b>\n\n\
+                     З Premium вам доступні ексклюзивні можливості:\n\
+                     • 🔍 <b>Пошук відео за назвою</b> через /search та в інлайн-режимі\n\
+                     • 💬 <b>Топ-коментарі до відео</b> зі зручною пагінацією\n\
+                     • 📺 <b>Відстеження YouTube-каналів</b> (до {limit} каналів)\n\
+                     • ⚡ <b>Миттєві сповіщення</b> про нові відео\n\
+                     • 📥 <b>Завантаження відео та MP3</b> в 1 клік\n\n\
+                     Оберіть варіант підключення нижче:",
+                )
+            }
+        }
+        Lang::Es => {
+            if is_premium {
+                format!(
+                    "✨ <b>Tu estado: Premium Activo</b> (hasta {expiry_str})\n\n\
+                     🔍 Búsqueda de videos: <b>activa</b> (/search o texto en chat)\n\
+                     💬 Lectura de comentarios: <b>activa</b>\n\
+                     📺 Seguimiento de canales: <b>{sub_count}/{limit}</b>\n\n\
+                     <i>Puedes renovar con Telegram Stars o código promocional:</i>",
+                )
+            } else {
+                format!(
+                    "⭐ <b>Suscripción Premium</b>\n\n\
+                     Con Premium obtienes funciones exclusivas:\n\
+                     • 🔍 <b>Buscar videos por título</b> vía /search y modo inline\n\
+                     • 💬 <b>Mejores comentarios</b> con paginación\n\
+                     • 📺 <b>Seguir canales de YouTube</b> (hasta {limit} canales)\n\
+                     • ⚡ <b>Notificaciones instantáneas</b> de nuevos videos\n\
+                     • 📥 <b>Descargas en 1 clic</b>\n\n\
+                     Elige una opción a continuación:",
                 )
             }
         }
         _ => {
             if is_premium {
-                (
-                    format!(
-                        "✨ <b>Your status: Premium Active</b>\n\n\
-                         🔍 Video search: <b>active</b> (/search or text in chat)\n\
-                         📺 Tracked channels: <b>{sub_count}/{limit}</b>\n\
-                         The bot sends new releases and lets you search any videos on YouTube.",
-                    ),
-                    "Disable Premium",
-                    "pr:off",
+                format!(
+                    "✨ <b>Your status: Premium Active</b> (until {expiry_str})\n\n\
+                     🔍 Video search: <b>active</b> (/search or text in chat)\n\
+                     💬 Video comments: <b>active</b>\n\
+                     📺 Tracked channels: <b>{sub_count}/{limit}</b>\n\n\
+                     <i>You can extend your subscription with Telegram Stars or promo code:</i>",
                 )
             } else {
-                (
-                    format!(
-                        "⭐ <b>Premium Subscription</b>\n\n\
-                         With Premium you unlock exclusive features:\n\
-                         • 🔍 <b>Search videos by title</b> via /search and inline mode\n\
-                         • 💬 <b>Top video comments</b> with pagination\n\
-                         • 📺 <b>Track YouTube channels</b> (up to {limit} channels)\n\
-                         • ⚡ <b>Instant notifications</b> on new releases\n\
-                         • 📥 <b>1-click video and MP3 downloads</b>\n\n\
-                         <i>During testing, you can activate Premium for free:</i>",
-                    ),
-                    "✨ Activate Test Premium",
-                    "pr:on",
+                format!(
+                    "⭐ <b>Premium Subscription</b>\n\n\
+                     With Premium you unlock exclusive features:\n\
+                     • 🔍 <b>Search videos by title</b> via /search and inline mode\n\
+                     • 💬 <b>Top video comments</b> with pagination\n\
+                     • 📺 <b>Track YouTube channels</b> (up to {limit} channels)\n\
+                     • ⚡ <b>Instant notifications</b> on new releases\n\
+                     • 📥 <b>1-click video and MP3 downloads</b>\n\n\
+                     Choose an option below:",
                 )
             }
         }
     };
 
-    let kb = json!({
-        "inline_keyboard": [
-            [{ "text": btn_text, "callback_data": action }]
-        ]
-    });
+    let mut rows: Vec<Vec<Value>> = Vec::new();
 
-    (text, kb)
+    // 1. Welcome promo button if not yet used
+    if !has_welcome {
+        let welcome_btn = match lang {
+            Lang::Ru => "🎁 Активировать 30 дней бесплатно",
+            Lang::Uk => "🎁 Активувати 30 днів безкоштовно",
+            Lang::Es => "🎁 Activar 30 días gratis",
+            _ => "🎁 Activate 30 days free",
+        };
+        rows.push(vec![json!({ "text": welcome_btn, "callback_data": "pr:start30" })]);
+    }
+
+    // 2. Stars purchase options
+    let price_1m = app.cfg.stars_price_1m;
+    let price_3m = app.cfg.stars_price_3m;
+    let (btn_1m, btn_3m) = if is_premium {
+        match lang {
+            Lang::Ru => (format!("➕ Продлить на 1 мес. — {price_1m} ⭐️"), format!("➕ Продлить на 3 мес. — {price_3m} ⭐️")),
+            Lang::Uk => (format!("➕ Подовжити на 1 міс. — {price_1m} ⭐️"), format!("➕ Подовжити на 3 міс. — {price_3m} ⭐️")),
+            Lang::Es => (format!("➕ Renovar 1 mes — {price_1m} ⭐️"), format!("➕ Renovar 3 meses — {price_3m} ⭐️")),
+            _ => (format!("➕ Extend 1 month — {price_1m} ⭐️"), format!("➕ Extend 3 months — {price_3m} ⭐️")),
+        }
+    } else {
+        match lang {
+            Lang::Ru => (format!("⭐ 1 месяц — {price_1m} ⭐️"), format!("⭐ 3 месяца — {price_3m} ⭐️")),
+            Lang::Uk => (format!("⭐ 1 місяць — {price_1m} ⭐️"), format!("⭐ 3 місяці — {price_3m} ⭐️")),
+            Lang::Es => (format!("⭐ 1 mes — {price_1m} ⭐️"), format!("⭐ 3 meses — {price_3m} ⭐️")),
+            _ => (format!("⭐ 1 month — {price_1m} ⭐️"), format!("⭐ 3 months — {price_3m} ⭐️")),
+        }
+    };
+    rows.push(vec![
+        json!({ "text": btn_1m, "callback_data": "pr:buy:30" }),
+        json!({ "text": btn_3m, "callback_data": "pr:buy:90" }),
+    ]);
+
+    // 3. Promo code button
+    let promo_btn = match lang {
+        Lang::Ru => "🎟 Ввести промокод",
+        Lang::Uk => "🎟 Ввести промокод",
+        Lang::Es => "🎟 Canjear código",
+        _ => "🎟 Enter promo code",
+    };
+    rows.push(vec![json!({ "text": promo_btn, "callback_data": "pr:code_hint" })]);
+
+    if is_premium {
+        let off_btn = match lang {
+            Lang::Ru => "Отключить Premium",
+            Lang::Uk => "Вимкнути Premium",
+            Lang::Es => "Desactivar Premium",
+            _ => "Disable Premium",
+        };
+        rows.push(vec![json!({ "text": off_btn, "callback_data": "pr:off" })]);
+    }
+
+    (text, json!({ "inline_keyboard": rows }))
+}
+
+fn premium_upsell_keyboard(app: &App, user_id: i64, lang: Lang) -> Value {
+    if !app.store.has_user_activated_welcome(user_id) {
+        let btn = match lang {
+            Lang::Ru => "🎁 Активировать 30 дней бесплатно",
+            Lang::Uk => "🎁 Активувати 30 днів безкоштовно",
+            Lang::Es => "🎁 Activar 30 días gratis",
+            _ => "🎁 Activate 30 days free",
+        };
+        json!({
+            "inline_keyboard": [[{ "text": btn, "callback_data": "pr:start30" }]]
+        })
+    } else {
+        let price_1m = app.cfg.stars_price_1m;
+        let btn_1m = match lang {
+            Lang::Ru => format!("⭐ 1 месяц — {price_1m} ⭐️"),
+            Lang::Uk => format!("⭐ 1 місяць — {price_1m} ⭐️"),
+            Lang::Es => format!("⭐ 1 mes — {price_1m} ⭐️"),
+            _ => format!("⭐ 1 month — {price_1m} ⭐️"),
+        };
+        json!({
+            "inline_keyboard": [
+                [{ "text": btn_1m, "callback_data": "pr:buy:30" }]
+            ]
+        })
+    }
 }
 
 fn subscriptions_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
@@ -265,23 +384,17 @@ async fn handle_channel_subscription_request(app: &Arc<App>, ctx: &Ctx, url: &st
 
     // 1. Check if user is premium
     if !app.store.is_user_premium(user_id) {
-        let (prompt, btn) = match lang {
-            Lang::Ru => (
-                "⭐ <b>Отслеживание каналов доступно только с Premium</b>\n\n\
-                 С Premium бот будет автоматически присылать новые ролики с ваших любимых каналов с кнопками скачивания в 1 клик.\n\n\
-                 <i>Пока идет тестирование, Premium можно активировать бесплатно:</i>",
-                "✨ Активировать тестовый Premium",
-            ),
-            _ => (
-                "⭐ <b>Channel subscriptions require Premium</b>\n\n\
-                 With Premium, the bot will automatically send new videos from your favorite channels with 1-click download buttons.\n\n\
-                 <i>During testing, you can activate Premium for free:</i>",
-                "✨ Activate Test Premium",
-            ),
+        let prompt = match lang {
+            Lang::Ru => "⭐ <b>Отслеживание каналов доступно только с Premium</b>\n\n\
+                         С Premium бот будет автоматически присылать новые ролики с ваших любимых каналов с кнопками скачивания в 1 клик.",
+            Lang::Uk => "⭐ <b>Відстеження каналів доступне лише з Premium</b>\n\n\
+                         З Premium бот автоматично надсилатиме нові ролики з улюблених каналів.",
+            Lang::Es => "⭐ <b>El seguimiento de canales requiere Premium</b>\n\n\
+                         Con Premium el bot enviará nuevos videos automáticamente.",
+            _ => "⭐ <b>Channel subscriptions require Premium</b>\n\n\
+                  With Premium, the bot will automatically send new videos from your favorite channels.",
         };
-        let kb = json!({
-            "inline_keyboard": [[{ "text": btn, "callback_data": "pr:on" }]]
-        });
+        let kb = premium_upsell_keyboard(app, user_id, lang);
         let _ = app.bot.send_message(chat, thread, prompt, Some(kb), reply_to).await;
         return;
     }
@@ -493,35 +606,17 @@ async fn handle_search_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, args: &
 
     // 1. Check if user is premium
     if !app.store.is_user_premium(user_id) {
-        let (prompt, btn) = match lang {
-            Lang::Ru => (
-                "⭐ <b>Поиск по видео доступен только с Premium</b>\n\n\
-                 С Premium вы можете искать любые видео по названию прямо в Telegram и скачивать их в 1 клик.\n\n\
-                 <i>Пока идет тестирование, Premium можно активировать бесплатно:</i>",
-                "✨ Активировать тестовый Premium",
-            ),
-            Lang::Uk => (
-                "⭐ <b>Пошук відео доступний лише з Premium</b>\n\n\
-                 З Premium ви можете шукати будь-які відео за назвою прямо в Telegram та завантажувати їх в 1 клік.\n\n\
-                 <i>Поки триває тестування, Premium можна активувати безкоштовно:</i>",
-                "✨ Активувати тестовий Premium",
-            ),
-            Lang::Es => (
-                "⭐ <b>La búsqueda de videos solo está disponible con Premium</b>\n\n\
-                 Con Premium puedes buscar videos por título directamente en Telegram y descargarlos en 1 clic.\n\n\
-                 <i>Durante las pruebas, puedes activar Premium gratis:</i>",
-                "✨ Activar Premium de prueba",
-            ),
-            _ => (
-                "⭐ <b>Video search is only available with Premium</b>\n\n\
-                 With Premium you can search any video by title directly in Telegram and download with 1 click.\n\n\
-                 <i>During testing, you can activate Premium for free:</i>",
-                "✨ Activate Test Premium",
-            ),
+        let prompt = match lang {
+            Lang::Ru => "⭐ <b>Поиск по видео доступен только с Premium</b>\n\n\
+                         С Premium вы можете искать любые видео по названию прямо в Telegram и скачивать их в 1 клик.",
+            Lang::Uk => "⭐ <b>Пошук відео доступний лише з Premium</b>\n\n\
+                         З Premium ви можете шукати будь-які відео за назвою прямо в Telegram та завантажувати їх в 1 клік.",
+            Lang::Es => "⭐ <b>La búsqueda de videos solo está disponible con Premium</b>\n\n\
+                         Con Premium puedes buscar videos por título directamente en Telegram y descargarlos en 1 clic.",
+            _ => "⭐ <b>Video search is only available with Premium</b>\n\n\
+                  With Premium you can search any video by title directly in Telegram and download with 1 click.",
         };
-        let kb = json!({
-            "inline_keyboard": [[{ "text": btn, "callback_data": "pr:on" }]]
-        });
+        let kb = premium_upsell_keyboard(app, user_id, lang);
         let _ = app.bot.send_message(chat, thread, prompt, Some(kb), Some(msg.message_id)).await;
         return;
     }
@@ -819,6 +914,11 @@ pub async fn handle(app: Arc<App>, update: Update) {
         handle_callback(&app, cb).await;
     } else if let Some(iq) = update.inline_query {
         handle_inline_query(&app, iq).await;
+    } else if let Some(pcq) = update.pre_checkout_query {
+        let bot = app.bot.clone();
+        tokio::spawn(async move {
+            let _ = bot.answer_pre_checkout_query(&pcq.id, true, None).await;
+        });
     }
 }
 
@@ -969,22 +1069,62 @@ async fn enqueue_all(
     }
 }
 
+async fn handle_successful_payment(app: &Arc<App>, ctx: &Ctx, payment: &crate::telegram::SuccessfulPayment) {
+    if payment.currency == "XTR" {
+        let days: u32 = match payment.invoice_payload.as_str() {
+            "premium_90d" => 90,
+            _ => 30,
+        };
+        let new_expires = app.store.add_premium_days(ctx.user, days);
+        let date_str = crate::util::format_date_str(new_expires as i64);
+        let text = match ctx.lang {
+            Lang::Ru => format!(
+                "🎉 <b>Спасибо за поддержку!</b>\n\n\
+                 Ваша подписка Premium продлена на <b>{days} дней</b> (активна до <b>{date_str}</b>).\n\n\
+                 Вам доступны поиск видео, чтение комментариев и отслеживание YouTube-каналов!"
+            ),
+            Lang::Uk => format!(
+                "🎉 <b>Дякуємо за підтримку!</b>\n\n\
+                 Ваша підписка Premium подовжена на <b>{days} днів</b> (активна до <b>{date_str}</b>).\n\n\
+                 Вам доступні пошук відео, читання коментарів та відстеження YouTube-каналів!"
+            ),
+            Lang::Es => format!(
+                "🎉 <b>¡Gracias por tu apoyo!</b>\n\n\
+                 Tu suscripción Premium se ha extendido por <b>{days} días</b> (activa hasta <b>{date_str}</b>).\n\n\
+                 ¡Tienes acceso a búsqueda de videos, comentarios y seguimiento de canales!"
+            ),
+            _ => format!(
+                "🎉 <b>Thank you for your support!</b>\n\n\
+                 Your Premium subscription has been extended by <b>{days} days</b> (active until <b>{date_str}</b>).\n\n\
+                 Video search, comments, and channel tracking are now available!"
+            ),
+        };
+        let _ = app.bot.send_message(ctx.chat, ctx.thread, &text, None, None).await;
+    }
+}
+
 async fn handle_message(app: &Arc<App>, msg: Message) {
     let Some(user) = msg.from.clone() else { return };
     if user.is_bot {
         return;
     }
     app.stats.record_user(user.id, user.username.as_deref(), user.first_name.as_deref());
+
+    let lang = app.lang_for(msg.chat.id, Some(&user));
+    let t = lang.t();
+    let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: user.id, lang };
+
+    if let Some(payment) = &msg.successful_payment {
+        handle_successful_payment(app, &ctx, payment).await;
+        return;
+    }
+
     let text = msg.text.as_deref().or(msg.caption.as_deref()).unwrap_or("").to_string();
     let command = parse_command(&text, &app.bot.username);
     if text.starts_with('/') && command.is_none() {
         return; // a command for some other bot in the group
     }
     let is_topic_cmd = command.as_ref().is_some_and(|(c, _)| c == "topic");
-
-    let lang = app.lang_for(msg.chat.id, Some(&user));
-    let t = lang.t();
-    let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: user.id, lang };
 
     match check_access(app, &msg, Some(&user), is_topic_cmd) {
         Access::Granted => {}
@@ -1111,14 +1251,12 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
             let is_premium = app.store.is_user_premium(ctx.user);
             if !is_premium {
                 let prompt = match ctx.lang {
-                    Lang::Ru => "⭐ <b>Чтение комментариев доступно только с Premium</b>\n\nАктивируйте бесплатный тестовый Premium:",
-                    Lang::Uk => "⭐ <b>Читання коментарів доступне лише з Premium</b>\n\nАктивуйте тестовий Premium:",
-                    Lang::Es => "⭐ <b>La lectura de comentarios solo está disponible con Premium</b>\n\nActiva Premium de prueba:",
-                    _ => "⭐ <b>Reading comments is only available with Premium</b>\n\nActivate test Premium:",
+                    Lang::Ru => "⭐ <b>Чтение комментариев доступно только с Premium</b>",
+                    Lang::Uk => "⭐ <b>Читання коментарів доступне лише з Premium</b>",
+                    Lang::Es => "⭐ <b>La lectura de comentarios solo está disponible con Premium</b>",
+                    _ => "⭐ <b>Reading comments is only available with Premium</b>",
                 };
-                let kb = json!({
-                    "inline_keyboard": [[{ "text": "✨ Активировать тестовый Premium", "callback_data": "pr:on" }]]
-                });
+                let kb = premium_upsell_keyboard(app, ctx.user, ctx.lang);
                 let _ = app.bot.send_message(chat, thread, prompt, Some(kb), Some(msg.message_id)).await;
                 return;
             }
@@ -1164,6 +1302,83 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
         "premium" => {
             let (text, kb) = premium_menu(app, ctx.user, ctx.lang);
             app.say(chat, thread, &text, Some(kb)).await;
+        }
+        "promo" | "code" => {
+            let code = args.trim();
+            if code.is_empty() {
+                let hint = match ctx.lang {
+                    Lang::Ru => "🎟 <b>Активация промокода</b>\n\nИспользование: <code>/promo ВАШ_ПРОМОКОД</code>\n\nЕсли у вас есть промокод на бесплатный период или подарок, отправьте его вместе с этой командой.",
+                    Lang::Uk => "🎟 <b>Активація промокоду</b>\n\nВикористання: <code>/promo ВАШ_ПРОМОКОД</code>",
+                    Lang::Es => "🎟 <b>Canjear código promocional</b>\n\nUso: <code>/promo TU_CODIGO</code>",
+                    _ => "🎟 <b>Promo Code Activation</b>\n\nUsage: <code>/promo YOUR_CODE</code>",
+                };
+                app.say(chat, thread, hint, None).await;
+                return;
+            }
+
+            match app.store.activate_promocode(ctx.user, code) {
+                Ok(res) => {
+                    let date_str = crate::util::format_date_str(res.expires_at as i64);
+                    let success_msg = match ctx.lang {
+                        Lang::Ru => format!(
+                            "🎉 <b>Промокод «{}» успешно активирован!</b>\n\n\
+                             Вам начислено <b>{} дней</b> подписки Premium.\n\
+                             Подписка активна до: <b>{}</b>\n\n\
+                             Вам доступны: поиск видео (/search), чтение комментариев и отслеживание каналов (/subscriptions)!",
+                            res.code, res.duration_days, date_str
+                        ),
+                        Lang::Uk => format!(
+                            "🎉 <b>Промокод «{}» успішно активовано!</b>\n\n\
+                             Вам нараховано <b>{} днів</b> підписки Premium.\n\
+                             Підписка активна до: <b>{}</b>",
+                            res.code, res.duration_days, date_str
+                        ),
+                        Lang::Es => format!(
+                            "🎉 <b>¡Código «{}» activado con éxito!</b>\n\n\
+                             Has recibido <b>{} días</b> de suscripción Premium.\n\
+                             Activa hasta: <b>{}</b>",
+                            res.code, res.duration_days, date_str
+                        ),
+                        _ => format!(
+                            "🎉 <b>Promo code «{}» successfully activated!</b>\n\n\
+                             You received <b>{} days</b> of Premium subscription.\n\
+                             Active until: <b>{}</b>",
+                            res.code, res.duration_days, date_str
+                        ),
+                    };
+                    app.say(chat, thread, &success_msg, None).await;
+                }
+                Err(crate::state::PromoError::NotFound) => {
+                    let err_msg = match ctx.lang {
+                        Lang::Ru => "❌ Промокод не найден. Проверьте правильность написания и попробуйте снова.",
+                        Lang::Uk => "❌ Промокод не знайдено. Перевірте правильність написання.",
+                        Lang::Es => "❌ Código promocional no encontrado. Verifica que esté bien escrito.",
+                        _ => "❌ Promo code not found. Please check spelling and try again.",
+                    };
+                    app.say(chat, thread, err_msg, None).await;
+                }
+                Err(crate::state::PromoError::AlreadyUsedByYou) => {
+                    let err_msg = match ctx.lang {
+                        Lang::Ru => "⚠️ Вы уже активировали этот промокод ранее на своём аккаунте.",
+                        Lang::Uk => "⚠️ Ви вже активували цей промокод раніше на своєму акаунті.",
+                        Lang::Es => "⚠️ Ya has activado este código promocional anteriormente.",
+                        _ => "⚠️ You have already activated this promo code on your account.",
+                    };
+                    app.say(chat, thread, err_msg, None).await;
+                }
+                Err(crate::state::PromoError::Exhausted) => {
+                    let err_msg = match ctx.lang {
+                        Lang::Ru => "⌛ К сожалению, лимит активаций этого промокода уже исчерпан.",
+                        Lang::Uk => "⌛ На жаль, ліміт активацій цього промокоду вже вичерпано.",
+                        Lang::Es => "⌛ Lamentablemente, se ha alcanzado el límite de usos de este código.",
+                        _ => "⌛ Unfortunately, this promo code has reached its activation limit.",
+                    };
+                    app.say(chat, thread, err_msg, None).await;
+                }
+                Err(crate::state::PromoError::DatabaseError) => {
+                    app.say(chat, thread, "❌ Database error. Please try again later.", None).await;
+                }
+            }
         }
         "subscriptions" | "subs" => {
             let (text, kb) = subscriptions_menu(app, ctx.user, ctx.lang);
@@ -1445,6 +1660,118 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
             }
             app.say(chat, thread, &format!("📢 Broadcast completed: {sent} sent, {failed} failed."), None).await;
         }
+        "addpromo" => {
+            if !app.is_admin(ctx.user) {
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
+                return;
+            }
+            let parts: Vec<&str> = args.split_whitespace().collect();
+            if parts.len() < 2 {
+                app.say(chat, thread, "Usage: <code>/addpromo &lt;CODE&gt; &lt;DAYS&gt; [MAX_USES]</code>\nExample: <code>/addpromo NY2027 30 100</code> (0 = unlimited)", None).await;
+                return;
+            }
+            let code = parts[0];
+            let Ok(days) = parts[1].parse::<u32>() else {
+                app.say(chat, thread, "❌ Invalid days number.", None).await;
+                return;
+            };
+            let max_uses = parts.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            match app.store.create_promocode(code, days, max_uses) {
+                Ok(true) => {
+                    let limit_str = if max_uses == 0 { "безлимитно".to_string() } else { format!("{max_uses} активаций") };
+                    let msg = format!("✅ Промокод <code>{code}</code> успешно создан!\n• Длительность: <b>{days} дней</b>\n• Лимит: <b>{limit_str}</b>");
+                    app.say(chat, thread, &msg, None).await;
+                }
+                Ok(false) => {
+                    app.say(chat, thread, &format!("⚠️ Промокод <code>{code}</code> уже существует!"), None).await;
+                }
+                Err(e) => {
+                    app.say(chat, thread, &format!("❌ Ошибка создания промокода: {e}"), None).await;
+                }
+            }
+        }
+        "promos" => {
+            if !app.is_admin(ctx.user) {
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
+                return;
+            }
+            let list = app.store.list_promocodes();
+            if list.is_empty() {
+                app.say(chat, thread, "Список промокодов пуст.", None).await;
+                return;
+            }
+            let mut text = String::from("🎟 <b>Список промокодов:</b>\n\n");
+            for p in list {
+                let limit = if p.max_uses == 0 { "∞".to_string() } else { p.max_uses.to_string() };
+                text.push_str(&format!(
+                    "• <code>{}</code> — <b>{} дн.</b> (использовано: {}/{})\n",
+                    p.code, p.duration_days, p.used_count, limit
+                ));
+            }
+            app.say(chat, thread, &text, None).await;
+        }
+        "giftall" => {
+            if !app.is_admin(ctx.user) {
+                if !msg.chat.is_group() {
+                    app.say(chat, thread, t.not_authorized, None).await;
+                }
+                return;
+            }
+            let parts: Vec<&str> = args.split_whitespace().collect();
+            if parts.is_empty() {
+                app.say(chat, thread, "Usage: <code>/giftall &lt;DAYS&gt; [HOLIDAY_MESSAGE]</code>\nExample: <code>/giftall 14 С праздником! Дарим 2 недели Premium!</code>", None).await;
+                return;
+            }
+            let Ok(days) = parts[0].parse::<u32>() else {
+                app.say(chat, thread, "❌ Неверное количество дней.", None).await;
+                return;
+            };
+            let custom_msg = if parts.len() > 1 {
+                args.split_once(char::is_whitespace).map(|(_, rest)| rest.trim()).unwrap_or("")
+            } else {
+                ""
+            };
+
+            let user_ids = app.stats.all_user_ids();
+            let total_users = user_ids.len();
+            let gifted = app.store.gift_premium_to_users(&user_ids, days);
+
+            app.say(
+                chat,
+                thread,
+                &format!("🎁 <b>Начислено {days} дней Premium</b> для <b>{gifted}</b> пользователей (из {total_users} найденных).\n\nЗапускаю рассылку уведомлений..."),
+                None,
+            ).await;
+
+            let app_clone = app.clone();
+            let admin_chat = chat;
+            let admin_thread = thread;
+            let note = custom_msg.to_string();
+            tokio::spawn(async move {
+                let mut sent = 0usize;
+                let mut failed = 0usize;
+                let broadcast_text = if note.is_empty() {
+                    format!("🎉 <b>Праздничный подарок!</b>\n\nВам автоматически начислено <b>{days} дней</b> Premium подписки бесплатно!\n\nПроверить статус: /premium")
+                } else {
+                    format!("🎉 <b>Праздничный подарок!</b>\n\nВам автоматически начислено <b>{days} дней</b> Premium подписки!\n\n<i>{note}</i>\n\nПроверить статус: /premium")
+                };
+
+                for uid in user_ids {
+                    match app_clone.bot.send_message(uid, None, &broadcast_text, None, None).await {
+                        Ok(_) => sent += 1,
+                        Err(_) => failed += 1,
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                }
+
+                let report = format!("✅ <b>Рассылка подарка завершена!</b>\n• Доставлено: {sent}\n• Ошибок (бот заблокирован): {failed}");
+                let _ = app_clone.bot.send_message(admin_chat, admin_thread, &report, None, None).await;
+            });
+        }
         _ => {
             if !msg.chat.is_group() {
                 app.say(chat, thread, t.nudge, None).await;
@@ -1595,17 +1922,140 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
             }
         }
         "pr" => {
-            let is_on = rest == "on";
-            app.store.set_user_premium(cb.from.id, is_on, 0);
-            let alert = match (lang, is_on) {
-                (Lang::Ru, true) => "✨ Тестовый Premium успешно активирован!",
-                (Lang::Ru, false) => "Premium отключен",
-                (_, true) => "✨ Test Premium activated!",
-                (_, false) => "Premium disabled",
-            };
-            app.bot.answer_callback(&cb.id, Some(alert), false).await;
-            let (text, kb) = premium_menu(app, cb.from.id, lang);
-            let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+            if rest == "start30" {
+                match app.store.activate_promocode(cb.from.id, "START30") {
+                    Ok(res) => {
+                        let date_str = crate::util::format_date_str(res.expires_at as i64);
+                        let alert = match lang {
+                            Lang::Ru => format!("✨ Промокод активирован! Premium на 30 дней (до {date_str})."),
+                            Lang::Uk => format!("✨ Промокод активовано! Premium на 30 днів (до {date_str})."),
+                            Lang::Es => format!("✨ ¡Código activado! Premium por 30 días (hasta {date_str})."),
+                            _ => format!("✨ Promo code activated! 30 days Premium (until {date_str})."),
+                        };
+                        app.bot.answer_callback(&cb.id, Some(&alert), true).await;
+                    }
+                    Err(crate::state::PromoError::AlreadyUsedByYou) => {
+                        let alert = match lang {
+                            Lang::Ru => "Вы уже активировали этот промокод ранее.",
+                            Lang::Uk => "Ви вже активували цей промокод раніше.",
+                            Lang::Es => "Ya has activado este código promocional anteriormente.",
+                            _ => "You have already used this promo code.",
+                        };
+                        app.bot.answer_callback(&cb.id, Some(alert), true).await;
+                    }
+                    Err(_) => {
+                        app.bot.answer_callback(&cb.id, Some("Error activating code"), false).await;
+                    }
+                }
+                let (text, kb) = premium_menu(app, cb.from.id, lang);
+                let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+                return;
+            } else if let Some(days_str) = rest.strip_prefix("buy:") {
+                let days: u32 = days_str.parse().unwrap_or(30);
+                let (title, desc, payload, amount) = match days {
+                    90 => (
+                        match lang {
+                            Lang::Ru => "Подписка Premium на 3 месяца",
+                            Lang::Uk => "Підписка Premium на 3 місяці",
+                            Lang::Es => "Suscripción Premium 3 meses",
+                            _ => "Premium Subscription 3 months",
+                        },
+                        match lang {
+                            Lang::Ru => "Поиск видео, чтение комментариев и отслеживание YouTube-каналов на 90 дней",
+                            Lang::Uk => "Пошук відео, коментарі та відстеження YouTube-каналів на 90 днів",
+                            Lang::Es => "Búsqueda de videos, comentarios y seguimiento de canales por 90 días",
+                            _ => "Video search, comments, and channel tracking for 90 days",
+                        },
+                        "premium_90d",
+                        app.cfg.stars_price_3m,
+                    ),
+                    _ => (
+                        match lang {
+                            Lang::Ru => "Подписка Premium на 1 месяц",
+                            Lang::Uk => "Підписка Premium на 1 місяць",
+                            Lang::Es => "Suscripción Premium 1 mes",
+                            _ => "Premium Subscription 1 month",
+                        },
+                        match lang {
+                            Lang::Ru => "Поиск видео, чтение комментариев и отслеживание YouTube-каналов на 30 дней",
+                            Lang::Uk => "Пошук відео, коментарі та відстеження YouTube-каналів на 30 днів",
+                            Lang::Es => "Búsqueda de videos, comentarios y seguimiento de canales por 30 días",
+                            _ => "Video search, comments, and channel tracking for 30 days",
+                        },
+                        "premium_30d",
+                        app.cfg.stars_price_1m,
+                    ),
+                };
+
+                let prices = vec![serde_json::json!({
+                    "label": title,
+                    "amount": amount,
+                })];
+
+                let _ = app.bot.send_invoice(msg.chat.id, title, desc, payload, "XTR", &prices).await;
+                app.bot.answer_callback(&cb.id, None, false).await;
+                return;
+            } else if rest == "buy_disc:30" {
+                let amount = app.cfg.stars_discount_1m;
+                let (title, desc) = match lang {
+                    Lang::Ru => (
+                        "Продление Premium на 1 месяц (скидка!)",
+                        "Специальная цена на продление: поиск, комментарии и подписки на 30 дней",
+                    ),
+                    Lang::Uk => (
+                        "Подовження Premium на 1 місяць (знижка!)",
+                        "Спеціальна ціна на подовження на 30 днів",
+                    ),
+                    Lang::Es => (
+                        "Renovación Premium 1 mes (¡descuento!)",
+                        "Precio especial de renovación por 30 días",
+                    ),
+                    _ => (
+                        "Premium Renewal 1 month (discount!)",
+                        "Special renewal price for 30 days",
+                    ),
+                };
+                let prices = vec![serde_json::json!({
+                    "label": title,
+                    "amount": amount,
+                })];
+                let _ = app.bot.send_invoice(msg.chat.id, title, desc, "premium_30d_discount", "XTR", &prices).await;
+                app.bot.answer_callback(&cb.id, None, false).await;
+                return;
+            } else if rest == "code_hint" {
+                let hint = match lang {
+                    Lang::Ru => "🎟 Чтобы активировать промокод, отправьте боту команду:\n/promo ВАШ_ПРОМОКОД",
+                    Lang::Uk => "🎟 Щоб активувати промокод, надішліть боту команду:\n/promo ВАШ_ПРОМОКОД",
+                    Lang::Es => "🎟 Para canjear un código, envía el comando:\n/promo TU_CODIGO",
+                    _ => "🎟 To activate a promo code, send the command:\n/promo YOUR_CODE",
+                };
+                app.bot.answer_callback(&cb.id, Some(hint), true).await;
+                return;
+            } else if rest == "off" {
+                app.store.set_user_premium(cb.from.id, false, 0);
+                let alert = match lang {
+                    Lang::Ru => "Premium отключен",
+                    Lang::Uk => "Premium вимкнено",
+                    Lang::Es => "Premium desactivado",
+                    _ => "Premium disabled",
+                };
+                app.bot.answer_callback(&cb.id, Some(alert), false).await;
+                let (text, kb) = premium_menu(app, cb.from.id, lang);
+                let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+                return;
+            } else {
+                let is_on = rest == "on";
+                app.store.set_user_premium(cb.from.id, is_on, 0);
+                let alert = match (lang, is_on) {
+                    (Lang::Ru, true) => "✨ Premium активирован!",
+                    (Lang::Ru, false) => "Premium отключен",
+                    (_, true) => "✨ Premium activated!",
+                    (_, false) => "Premium disabled",
+                };
+                app.bot.answer_callback(&cb.id, Some(alert), false).await;
+                let (text, kb) = premium_menu(app, cb.from.id, lang);
+                let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
+            }
         }
         "s" | "sub" => {
             let parts: Vec<&str> = rest.split(':').collect();
@@ -2165,6 +2615,99 @@ async fn handle_inline_query(app: &Arc<App>, iq: InlineQuery) {
     }
 }
 
+pub async fn check_and_notify_expiring_premium(app: &Arc<App>) {
+    let now = crate::state::now_secs();
+
+    // 1. Уведомление за 24 часа со скидкой
+    let to_warn = app.store.get_users_to_warn_expiry(now, 24 * 3600);
+    for (user_id, expires_at, activated_at) in to_warn {
+        let is_day = crate::state::is_user_daytime(activated_at, now);
+        let time_left = expires_at.saturating_sub(now);
+        // Отправляем, если сейчас дневное время пользователя ИЛИ если осталось меньше 2 часов
+        if is_day || time_left <= 2 * 3600 {
+            let lang = app.lang_for(user_id, None);
+            let date_str = crate::util::format_date_str(expires_at as i64);
+            let discount_price = app.cfg.stars_discount_1m;
+            let standard_price = app.cfg.stars_price_1m;
+
+            let text = match lang {
+                Lang::Ru => format!(
+                    "⏳ <b>Ваша подписка Premium скоро истекает ({date_str})!</b>\n\n\
+                     Продлите её прямо сейчас по специальной цене всего за <b>{discount_price} ⭐️</b> (вместо {standard_price} ⭐️)!\n\n\
+                     Оставшееся время не сгорит, а суммируется к новому сроку."
+                ),
+                Lang::Uk => format!(
+                    "⏳ <b>Ваша підписка Premium скоро закінчується ({date_str})!</b>\n\n\
+                     Подовжте її прямо зараз за спеціальною ціною всього за <b>{discount_price} ⭐️</b> (замість {standard_price} ⭐️)!\n\n\
+                     Залишок часу не згорить, а додасться до нового терміну."
+                ),
+                Lang::Es => format!(
+                    "⏳ <b>¡Tu suscripción Premium vencerá pronto ({date_str})!</b>\n\n\
+                     Renuévala ahora por solo <b>{discount_price} ⭐️</b> (en lugar de {standard_price} ⭐️).\n\n\
+                     ¡El tiempo restante se sumará!"
+                ),
+                _ => format!(
+                    "⏳ <b>Your Premium subscription expires soon ({date_str})!</b>\n\n\
+                     Renew it now for only <b>{discount_price} ⭐️</b> (regular {standard_price} ⭐️)!\n\n\
+                     The remaining time will be stacked."
+                ),
+            };
+
+            let btn_text = match lang {
+                Lang::Ru => format!("🔥 Продлить за {discount_price} ⭐️ со скидкой"),
+                Lang::Uk => format!("🔥 Подовжити за {discount_price} ⭐️ зі знижкою"),
+                Lang::Es => format!("🔥 Renovar por {discount_price} ⭐️ con descuento"),
+                _ => format!("🔥 Renew for {discount_price} ⭐️ discounted"),
+            };
+
+            let kb = json!({
+                "inline_keyboard": [
+                    [{ "text": btn_text, "callback_data": "pr:buy_disc:30" }]
+                ]
+            });
+
+            if app.bot.send_message(user_id, None, &text, Some(kb), None).await.is_ok() {
+                app.store.mark_user_expiry_warned(user_id);
+            }
+        }
+    }
+
+    // 2. Уведомление в момент истечения
+    let expired = app.store.get_users_expired_to_notify(now);
+    for (user_id, activated_at) in expired {
+        if crate::state::is_user_daytime(activated_at, now) {
+            let lang = app.lang_for(user_id, None);
+            let text = match lang {
+                Lang::Ru => "⌛ <b>Срок действия вашей подписки Premium подошел к концу.</b>\n\n\
+                             Отслеживание YouTube-каналов временно приостановлено. Вы можете возобновить подписку в любой момент в /premium.",
+                Lang::Uk => "⌛ <b>Термін дії вашої підписки Premium закінчився.</b>\n\n\
+                             Відстеження YouTube-каналів тимчасово призупинено. Ви можете відновити підписку в будь-який момент у /premium.",
+                Lang::Es => "⌛ <b>Tu suscripción Premium ha finalizado.</b>\n\n\
+                             El seguimiento de canales está en pausa. Puedes reactivarla en cualquier momento en /premium.",
+                _ => "⌛ <b>Your Premium subscription has expired.</b>\n\n\
+                      Channel tracking has been paused. You can renew at any time in /premium.",
+            };
+
+            let renew_btn = match lang {
+                Lang::Ru => "⭐ Возобновить Premium",
+                Lang::Uk => "⭐ Відновити Premium",
+                Lang::Es => "⭐ Reactivar Premium",
+                _ => "⭐ Renew Premium",
+            };
+
+            let kb = json!({
+                "inline_keyboard": [
+                    [{ "text": renew_btn, "callback_data": "pr:code_hint" }]
+                ]
+            });
+
+            if app.bot.send_message(user_id, None, text, Some(kb), None).await.is_ok() {
+                app.store.mark_user_expired_notified(user_id);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2199,7 +2742,8 @@ mod tests {
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
-        assert_eq!(command_list(Lang::Ru.t()).len(), 13);
+        assert_eq!(command_list(Lang::Ru.t()).len(), 14);
+        assert!(command_list(Lang::Ru.t()).iter().any(|(cmd, _)| *cmd == "promo"));
         assert!(command_list(Lang::Ru.t()).iter().any(|(cmd, _)| *cmd == "search"));
         let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080)).unwrap();
         let lq_str = lq.to_string();

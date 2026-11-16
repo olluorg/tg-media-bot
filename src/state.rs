@@ -62,6 +62,31 @@ pub struct TitleEntry {
     pub ts: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PromocodeInfo {
+    pub code: String,
+    pub duration_days: u32,
+    pub max_uses: usize,
+    pub used_count: usize,
+    #[allow(dead_code)]
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromoError {
+    NotFound,
+    AlreadyUsedByYou,
+    Exhausted,
+    DatabaseError,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActivatePromoResult {
+    pub code: String,
+    pub duration_days: u32,
+    pub expires_at: u64,
+}
+
 pub struct Store {
     #[allow(dead_code)]
     db_path: PathBuf,
@@ -140,7 +165,10 @@ fn init_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
          CREATE TABLE IF NOT EXISTS user_premium (
              user_id INTEGER PRIMARY KEY,
              is_premium INTEGER NOT NULL DEFAULT 0,
-             expires_at INTEGER NOT NULL DEFAULT 0
+             expires_at INTEGER NOT NULL DEFAULT 0,
+             activated_at INTEGER NOT NULL DEFAULT 0,
+             warned_at INTEGER NOT NULL DEFAULT 0,
+             expired_notified_at INTEGER NOT NULL DEFAULT 0
          );
 
          CREATE TABLE IF NOT EXISTS tracked_channels (
@@ -172,8 +200,36 @@ fn init_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
              sent_at INTEGER NOT NULL,
              PRIMARY KEY (user_id, video_id)
          );
-         CREATE INDEX IF NOT EXISTS idx_sent_notifications_ts ON sent_notifications(sent_at);",
+         CREATE INDEX IF NOT EXISTS idx_sent_notifications_ts ON sent_notifications(sent_at);
+
+         CREATE TABLE IF NOT EXISTS promocodes (
+             code TEXT PRIMARY KEY COLLATE NOCASE,
+             duration_days INTEGER NOT NULL,
+             max_uses INTEGER NOT NULL DEFAULT 0,
+             used_count INTEGER NOT NULL DEFAULT 0,
+             created_at INTEGER NOT NULL
+         );
+
+         CREATE TABLE IF NOT EXISTS promocode_activations (
+             code TEXT NOT NULL COLLATE NOCASE,
+             user_id INTEGER NOT NULL,
+             activated_at INTEGER NOT NULL,
+             PRIMARY KEY (code, user_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_promocode_activations_user ON promocode_activations(user_id);",
     )?;
+
+    let now = now_secs() as i64;
+    let _ = conn.execute("ALTER TABLE user_premium ADD COLUMN activated_at INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE user_premium ADD COLUMN warned_at INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE user_premium ADD COLUMN expired_notified_at INTEGER NOT NULL DEFAULT 0", []);
+
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO promocodes (code, duration_days, max_uses, used_count, created_at)
+         VALUES ('START30', 30, 0, 0, ?1)",
+        params![now],
+    );
+
     Ok(())
 }
 
@@ -769,14 +825,243 @@ impl Store {
 
     pub fn set_user_premium(&self, user_id: i64, is_premium: bool, expires_at: u64) {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
         let _ = conn.execute(
-            "INSERT INTO user_premium (user_id, is_premium, expires_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(user_id) DO UPDATE SET is_premium = excluded.is_premium, expires_at = excluded.expires_at",
-            params![user_id, if is_premium { 1 } else { 0 }, expires_at as i64],
+            "INSERT INTO user_premium (user_id, is_premium, expires_at, activated_at, warned_at, expired_notified_at)
+             VALUES (?1, ?2, ?3, ?4, 0, 0)
+             ON CONFLICT(user_id) DO UPDATE SET
+                is_premium = excluded.is_premium,
+                expires_at = excluded.expires_at,
+                activated_at = CASE WHEN user_premium.activated_at = 0 THEN excluded.activated_at ELSE user_premium.activated_at END,
+                warned_at = 0,
+                expired_notified_at = 0",
+            params![user_id, if is_premium { 1 } else { 0 }, expires_at as i64, now],
         );
         if is_premium {
             let _ = conn.execute("UPDATE user_subscriptions SET is_paused = 0 WHERE user_id = ?1", params![user_id]);
         }
+    }
+
+    /// Returns users whose premium expires in <= max_future_secs (e.g. 24h) and who haven't been warned yet.
+    /// (user_id, expires_at, activated_at)
+    pub fn get_users_to_warn_expiry(&self, now: u64, max_future_secs: u64) -> Vec<(i64, u64, u64)> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT user_id, expires_at, activated_at FROM user_premium
+             WHERE is_premium = 1 AND expires_at > ?1 AND expires_at <= ?2 AND warned_at = 0",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let max_exp = (now + max_future_secs) as i64;
+        let rows = stmt.query_map(params![now as i64, max_exp], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64))
+        });
+        rows.map(|iter| iter.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn mark_user_expiry_warned(&self, user_id: i64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+        let _ = conn.execute("UPDATE user_premium SET warned_at = ?1 WHERE user_id = ?2", params![now, user_id]);
+    }
+
+    /// Returns users whose premium has expired (expires_at <= now) and who haven't received expiry notification yet.
+    /// (user_id, activated_at)
+    pub fn get_users_expired_to_notify(&self, now: u64) -> Vec<(i64, u64)> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT user_id, activated_at FROM user_premium
+             WHERE is_premium = 1 AND expires_at > 0 AND expires_at <= ?1 AND expired_notified_at = 0",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(params![now as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
+        });
+        rows.map(|iter| iter.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn mark_user_expired_notified(&self, user_id: i64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+        let _ = conn.execute(
+            "UPDATE user_premium SET expired_notified_at = ?1, is_premium = 0 WHERE user_id = ?2",
+            params![now, user_id],
+        );
+        let _ = conn.execute("UPDATE user_subscriptions SET is_paused = 1 WHERE user_id = ?1", params![user_id]);
+    }
+
+    pub fn add_premium_days(&self, user_id: i64, days: u32) -> u64 {
+        let now = now_secs();
+        let (is_prem, cur_expires) = self.get_user_premium_info(user_id);
+        let start_ts = if is_prem && cur_expires > now { cur_expires } else { now };
+        let new_expires = start_ts + (days as u64) * 86400;
+        self.set_user_premium(user_id, true, new_expires);
+        new_expires
+    }
+
+    pub fn gift_premium_to_users(&self, user_ids: &[i64], days: u32) -> usize {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = match conn.transaction() {
+            Ok(tx) => tx,
+            Err(_) => return 0,
+        };
+        let now = now_secs() as i64;
+        let add_secs = (days as i64) * 86400;
+        let mut count = 0;
+        for &uid in user_ids {
+            let cur: (i64, i64) = tx
+                .query_row(
+                    "SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1",
+                    params![uid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((0, 0));
+            let start = if cur.0 != 0 && cur.1 > now { cur.1 } else { now };
+            let new_exp = start + add_secs;
+            let res = tx.execute(
+                "INSERT INTO user_premium (user_id, is_premium, expires_at) VALUES (?1, 1, ?2)
+                 ON CONFLICT(user_id) DO UPDATE SET is_premium = 1, expires_at = ?2",
+                params![uid, new_exp],
+            );
+            if res.is_ok() {
+                let _ = tx.execute("UPDATE user_subscriptions SET is_paused = 0 WHERE user_id = ?1", params![uid]);
+                count += 1;
+            }
+        }
+        let _ = tx.commit();
+        count
+    }
+
+    pub fn create_promocode(&self, code: &str, duration_days: u32, max_uses: usize) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_secs() as i64;
+        let res = conn.execute(
+            "INSERT INTO promocodes (code, duration_days, max_uses, used_count, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![code.trim(), duration_days, max_uses as i64, now],
+        );
+        match res {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 1555 || e.extended_code == 2067 => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn list_promocodes(&self) -> Vec<PromocodeInfo> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT code, duration_days, max_uses, used_count, created_at FROM promocodes ORDER BY created_at DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| {
+            Ok(PromocodeInfo {
+                code: r.get(0)?,
+                duration_days: r.get(1)?,
+                max_uses: r.get::<_, i64>(2)? as usize,
+                used_count: r.get::<_, i64>(3)? as usize,
+                created_at: r.get::<_, i64>(4)? as u64,
+            })
+        });
+        rows.map(|iter| iter.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn has_user_activated_code(&self, user_id: i64, code: &str) -> bool {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT 1 FROM promocode_activations WHERE user_id = ?1 AND code = ?2 COLLATE NOCASE",
+            params![user_id, code.trim()],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    pub fn has_user_activated_welcome(&self, user_id: i64) -> bool {
+        self.has_user_activated_code(user_id, "START30")
+    }
+
+    pub fn activate_promocode(&self, user_id: i64, code: &str) -> Result<ActivatePromoResult, PromoError> {
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            return Err(PromoError::NotFound);
+        }
+
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction().map_err(|_| PromoError::DatabaseError)?;
+
+        // 1. Fetch promocode
+        let promo: Result<(String, u32, i64, i64), _> = tx.query_row(
+            "SELECT code, duration_days, max_uses, used_count FROM promocodes WHERE code = ?1 COLLATE NOCASE",
+            params![trimmed],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        );
+        let (exact_code, duration_days, max_uses, used_count) = match promo {
+            Ok(data) => data,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(PromoError::NotFound),
+            Err(_) => return Err(PromoError::DatabaseError),
+        };
+
+        // 2. Check max uses
+        if max_uses > 0 && used_count >= max_uses {
+            return Err(PromoError::Exhausted);
+        }
+
+        // 3. Check if user already activated this code
+        let already: Result<i64, _> = tx.query_row(
+            "SELECT 1 FROM promocode_activations WHERE user_id = ?1 AND code = ?2 COLLATE NOCASE",
+            params![user_id, trimmed],
+            |r| r.get(0),
+        );
+        if already.is_ok() {
+            return Err(PromoError::AlreadyUsedByYou);
+        }
+
+        // 4. Record activation
+        let now = now_secs() as i64;
+        tx.execute(
+            "INSERT INTO promocode_activations (code, user_id, activated_at) VALUES (?1, ?2, ?3)",
+            params![exact_code, user_id, now],
+        )
+        .map_err(|_| PromoError::DatabaseError)?;
+
+        // 5. Increment used_count
+        tx.execute(
+            "UPDATE promocodes SET used_count = used_count + 1 WHERE code = ?1 COLLATE NOCASE",
+            params![trimmed],
+        )
+        .map_err(|_| PromoError::DatabaseError)?;
+
+        // 6. Calculate new premium expiry and update user_premium
+        let cur_prem: (i64, i64) = tx
+            .query_row(
+                "SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1",
+                params![user_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+        let start_ts = if cur_prem.0 != 0 && cur_prem.1 > now { cur_prem.1 } else { now };
+        let new_expires = (start_ts + (duration_days as i64) * 86400) as u64;
+
+        tx.execute(
+            "INSERT INTO user_premium (user_id, is_premium, expires_at) VALUES (?1, 1, ?2)
+             ON CONFLICT(user_id) DO UPDATE SET is_premium = 1, expires_at = ?2",
+            params![user_id, new_expires as i64],
+        )
+        .map_err(|_| PromoError::DatabaseError)?;
+
+        let _ = tx.execute("UPDATE user_subscriptions SET is_paused = 0 WHERE user_id = ?1", params![user_id]);
+
+        tx.commit().map_err(|_| PromoError::DatabaseError)?;
+
+        Ok(ActivatePromoResult {
+            code: exact_code,
+            duration_days,
+            expires_at: new_expires,
+        })
     }
 
     pub fn count_user_subscriptions(&self, user_id: i64) -> usize {
@@ -1029,6 +1314,19 @@ fn import_legacy(dir: &Path) -> LegacyData {
     data
 }
 
+/// Returns true if `now` is within +/- 6 hours of user's active hour-of-day.
+pub fn is_user_daytime(activated_at: u64, now: u64) -> bool {
+    if activated_at == 0 {
+        let utc_hour = (now % 86400) / 3600;
+        return (7..=20).contains(&utc_hour);
+    }
+    let act_tod = (activated_at % 86400) as i64;
+    let now_tod = (now % 86400) as i64;
+    let diff = (now_tod - act_tod).abs();
+    let circular_diff = diff.min(86400 - diff);
+    circular_diff <= 6 * 3600
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,6 +1571,78 @@ mod tests {
         // Search non-existent
         let res3 = store.cache_search("nonexistent query", 5);
         assert!(res3.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn promocode_and_gift_lifecycle() {
+        let dir = temp_dir("promo-gift-test");
+        let store = Store::load(&dir);
+
+        // START30 is seeded automatically
+        assert!(!store.has_user_activated_welcome(500));
+        let res = store.activate_promocode(500, "start30").expect("should activate START30");
+        assert_eq!(res.duration_days, 30);
+        assert!(store.is_user_premium(500));
+        assert!(store.has_user_activated_welcome(500));
+
+        // Can't activate same code twice
+        let err = store.activate_promocode(500, "START30").unwrap_err();
+        assert_eq!(err, PromoError::AlreadyUsedByYou);
+
+        // Create limited promo: max 1 use
+        store.create_promocode("GIFT100", 100, 1).unwrap();
+        let p_res = store.activate_promocode(500, "gift100").expect("stacks on existing");
+        assert_eq!(p_res.duration_days, 100);
+        // User now has 30 + 100 days of premium
+        let (is_p, exp) = store.get_user_premium_info(500);
+        assert!(is_p);
+        assert!(exp > now_secs() + 125 * 86400);
+
+        // Another user tries GIFT100 -> exhausted
+        let err2 = store.activate_promocode(600, "GIFT100").unwrap_err();
+        assert_eq!(err2, PromoError::Exhausted);
+
+        // Gift all
+        let gifted = store.gift_premium_to_users(&[500, 600, 700], 7);
+        assert_eq!(gifted, 3);
+        assert!(store.is_user_premium(600));
+        assert!(store.is_user_premium(700));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expiry_warning_and_daytime_check() {
+        let dir = temp_dir("expiry-test");
+        let store = Store::load(&dir);
+        let now = now_secs();
+
+        // Daytime check: same hour is daytime
+        assert!(is_user_daytime(now, now));
+        // 4 hours difference is daytime
+        assert!(is_user_daytime(now, now + 4 * 3600));
+        // 12 hours difference (opposite half of day, e.g. 03:00 vs 15:00) is night
+        assert!(!is_user_daytime(now, now + 12 * 3600));
+
+        // User expires in 12 hours
+        store.set_user_premium(1001, true, now + 12 * 3600);
+        let warn_list = store.get_users_to_warn_expiry(now, 24 * 3600);
+        assert!(warn_list.iter().any(|(uid, _, _)| *uid == 1001));
+
+        store.mark_user_expiry_warned(1001);
+        let warn_list2 = store.get_users_to_warn_expiry(now, 24 * 3600);
+        assert!(!warn_list2.iter().any(|(uid, _, _)| *uid == 1001));
+
+        // User already expired
+        store.set_user_premium(1002, true, now.saturating_sub(60));
+        let exp_list = store.get_users_expired_to_notify(now);
+        assert!(exp_list.iter().any(|(uid, _)| *uid == 1002));
+
+        store.mark_user_expired_notified(1002);
+        let exp_list2 = store.get_users_expired_to_notify(now);
+        assert!(!exp_list2.iter().any(|(uid, _)| *uid == 1002));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
