@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::app::{cancel_markup, stage_label, App, Cancel, Refusal, Request};
+use crate::app::{stage_label, App, Cancel, Refusal, Request};
 use crate::i18n::{fill, Lang, Strings, LANG_PROMPT};
 use crate::sys;
 use crate::telegram::{CallbackQuery, Message, Update, User};
@@ -217,6 +217,12 @@ async fn enqueue_all(
     let mut problems: Vec<String> = Vec::new();
     let mut minimal = app.store.minimal(ctx.chat);
 
+    if single {
+        if let Some(msg) = picker {
+            let _ = app.bot.delete_message(ctx.chat, msg).await;
+        }
+    }
+
     for url in urls {
         let req = Request {
             chat_id: ctx.chat,
@@ -225,21 +231,13 @@ async fn enqueue_all(
             url,
             quality,
             lang: ctx.lang,
-            status_msg: if single { picker } else { None },
+            status_msg: None,
             user_msg_id,
         };
         match app.enqueue(req) {
             Ok(job) => {
                 added += 1;
                 minimal = job.minimal;
-                if let (true, Some(msg), false) = (single, picker, job.minimal) {
-                    // Delete the picker and deliver a status card (photo with preview if available)
-                    let _ = app.bot.delete_message(ctx.chat, msg).await;
-                    let markup = cancel_markup(t, &job.id);
-                    if let Some(id) = app.deliver_status(&job, Some(markup)).await {
-                        app.set_status_msg(&job.id, id);
-                    }
-                }
             }
             Err(Refusal::UserQueueFull) => skipped += 1,
             Err(r) => {

@@ -1226,7 +1226,8 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
     match result {
         Ok(()) => {
             log::info!("job {} done in {:.0?}", job.id, started.elapsed());
-            if let Some(msg) = status_msg {
+            let to_delete = app.status_msg(&job.id).or(status_msg);
+            if let Some(msg) = to_delete {
                 if let Err(e) = app.bot.delete_message(job.chat_id, msg).await {
                     log::debug!("could not delete status message: {e}");
                 }
@@ -1274,7 +1275,8 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                 None
             };
 
-            if let Some(msg) = status_msg {
+            let to_delete = app.status_msg(&job.id).or(status_msg);
+            if let Some(msg) = to_delete {
                 let _ = app.bot.delete_message(job.chat_id, msg).await;
             }
             let text = error_text(job.lang.t(), &app.cfg, &err, &job.url);
