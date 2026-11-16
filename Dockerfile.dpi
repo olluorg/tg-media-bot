@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1
+# DPI flavor wrapper for tg-media-bot using zapret2
+#
+# Usage:
+#   docker build -f Dockerfile.dpi -t tg-media-bot:local-dpi .
+# Or build from pre-existing base image:
+#   docker build --build-arg BASE_IMAGE=ghcr.io/olluorg/tg-media-bot:latest -f Dockerfile.dpi -t tg-media-bot:dpi .
+
+ARG BASE_IMAGE=tg-media-bot:local
+ARG ZAPRET_VERSION=v1.0.7
+
+FROM alpine:3.20 AS zapret
+ARG TARGETARCH
+ARG ZAPRET_VERSION
+WORKDIR /tmp
+RUN apk add --no-cache curl tar
+RUN set -ex; \
+    ARCH="${TARGETARCH:-}"; \
+    if [ -z "$ARCH" ]; then \
+        case "$(uname -m)" in \
+            x86_64) ARCH="amd64" ;; \
+            aarch64) ARCH="arm64" ;; \
+            armv7l) ARCH="arm" ;; \
+            *) ARCH="amd64" ;; \
+        esac; \
+    fi; \
+    case "$ARCH" in \
+        amd64) ARCH_DIR="linux-x86_64" ;; \
+        arm64) ARCH_DIR="linux-arm64" ;; \
+        arm)   ARCH_DIR="linux-arm" ;; \
+        *) echo "Unsupported target architecture: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o zapret.tar.gz "https://github.com/bol-van/zapret2/releases/download/${ZAPRET_VERSION}/zapret2-${ZAPRET_VERSION}.tar.gz"; \
+    tar -xzf zapret.tar.gz --strip-components=1; \
+    mkdir -p /opt/zapret2/lua /opt/zapret2/fake; \
+    cp "binaries/${ARCH_DIR}/nfqws2" /opt/zapret2/nfqws2; \
+    cp lua/*.lua /opt/zapret2/lua/; \
+    cp files/fake/* /opt/zapret2/fake/; \
+    chmod 755 /opt/zapret2/nfqws2; \
+    chmod -R a+rX /opt/zapret2
+
+FROM ${BASE_IMAGE}
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        iptables \
+        ipset \
+        procps \
+        gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --set iptables /usr/sbin/iptables-legacy \
+    && update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+
+COPY --from=zapret /opt/zapret2 /opt/zapret2
+RUN ln -s /opt/zapret2/nfqws2 /usr/local/bin/nfqws2
+
+COPY packaging/entrypoint-dpi.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+ENV NFQWS2_OPT="--lua-desync=multidisorder:pos=1,midsld"
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/usr/local/bin/tg-media-bot"]

@@ -1,0 +1,75 @@
+# Docker Compose configuration with DPI bypass (zapret2)
+#
+# Usage:
+#   docker compose -f docker-compose.dpi.yml up -d
+# Or building locally from source:
+#   docker compose -f docker-compose.dpi.yml up -d --build
+#
+# Requires --cap-add=NET_ADMIN to configure iptables NFQUEUE rules.
+
+services:
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: "true"
+    volumes:
+      - bot-api-data:/var/lib/telegram-bot-api
+      - bot-tmp:/data/tmp:ro
+    depends_on:
+      - bot
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bot:
+    build:
+      context: .
+      target: runtime-dpi
+    image: ghcr.io/olluorg/tg-media-bot:latest-dpi
+    cap_add:
+      - NET_ADMIN
+    env_file: .env
+    environment:
+      API_SERVER_URL: http://telegram-bot-api:8081
+      LOCAL_API_SHARED_FILES: "true"
+      COOKIES_FILE: /cookies/cookies.txt
+      PLUGIN_DIR: /plugins
+      # Optional: custom nfqws2 desync parameters
+      # NFQWS2_OPT: "--lua-desync=multidisorder:pos=1,midsld"
+    volumes:
+      - bot-data:/data
+      - bot-tmp:/data/tmp
+      - ./cookies:/cookies
+      - ./plugins:/plugins:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/tg-media-bot", "health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 1024m
+    memswap_limit: 1024m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+    logging: *logging
+
+volumes:
+  bot-data:
+  bot-tmp:
+  bot-api-data:
