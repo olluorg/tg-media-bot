@@ -80,7 +80,7 @@ ENV PATH=/opt/yt-dlp/bin:$PATH \
     MALLOC_ARENA_MAX=2 \
     DENO_NO_UPDATE_CHECK=1 \
     DENO_DIR=/data/tmp/deno_cache \
-    DENO_V8_FLAGS="--jitless --max-old-space-size=64"
+    DENO_V8_FLAGS="--max-old-space-size=256"
 
 WORKDIR /data
 VOLUME ["/data"]

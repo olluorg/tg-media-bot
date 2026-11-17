@@ -1288,7 +1288,12 @@ async fn enqueue_all(
     }
 }
 
-async fn handle_successful_payment(app: &Arc<App>, ctx: &Ctx, payment: &crate::telegram::SuccessfulPayment) {
+async fn handle_successful_payment(
+    app: &Arc<App>,
+    ctx: &Ctx,
+    user: &crate::telegram::User,
+    payment: &crate::telegram::SuccessfulPayment,
+) {
     if payment.currency == "XTR" {
         let days: u32 = match payment.invoice_payload.as_str() {
             "premium_90d" => 90,
@@ -1296,6 +1301,17 @@ async fn handle_successful_payment(app: &Arc<App>, ctx: &Ctx, payment: &crate::t
         };
         let new_expires = app.store.add_premium_days(ctx.user, days);
         let date_str = crate::util::format_date_str(new_expires as i64);
+
+        log::info!(
+            "Payment received: user_id={} username={:?} amount={} {} payload={} (new expiry: {})",
+            ctx.user,
+            user.username,
+            payment.total_amount,
+            payment.currency,
+            payment.invoice_payload,
+            date_str
+        );
+
         let text = match ctx.lang {
             Lang::Ru => format!(
                 "🎉 <b>Спасибо за поддержку!</b>\n\n\
@@ -1319,6 +1335,38 @@ async fn handle_successful_payment(app: &Arc<App>, ctx: &Ctx, payment: &crate::t
             ),
         };
         let _ = app.bot.send_message(ctx.chat, ctx.thread, &text, None, None).await;
+
+        // Notify admins
+        let admin_ids: Vec<i64> = if !app.cfg.admin_users.is_empty() {
+            app.cfg.admin_users.iter().copied().collect()
+        } else {
+            app.cfg.allowed_users.iter().copied().collect()
+        };
+
+        if !admin_ids.is_empty() {
+            let user_info = match (&user.username, &user.first_name) {
+                (Some(uname), Some(fname)) => {
+                    format!("{} (@{})", util::html_escape(fname), util::html_escape(uname))
+                }
+                (Some(uname), None) => format!("@{}", util::html_escape(uname)),
+                (None, Some(fname)) => util::html_escape(fname),
+                (None, None) => "—".to_string(),
+            };
+
+            let admin_msg = format!(
+                "⭐ <b>Новая оплата Premium!</b>\n\n\
+                 👤 <b>Пользователь:</b> {user_info}\n\
+                 🆔 <b>ID:</b> <code>{}</code>\n\
+                 💰 <b>Сумма:</b> {} ⭐ (Telegram Stars)\n\
+                 ⏳ <b>Период:</b> +{days} дн. (до {date_str})\n\
+                 🧾 <b>Тариф:</b> <code>{}</code>",
+                ctx.user, payment.total_amount, payment.invoice_payload
+            );
+
+            for admin_id in admin_ids {
+                app.say(admin_id, None, &admin_msg, None).await;
+            }
+        }
     }
 }
 
@@ -1334,7 +1382,7 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
     let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: user.id, lang };
 
     if let Some(payment) = &msg.successful_payment {
-        handle_successful_payment(app, &ctx, payment).await;
+        handle_successful_payment(app, &ctx, &user, payment).await;
         return;
     }
 

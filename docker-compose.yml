@@ -53,6 +53,7 @@ services:
       LOCAL_API_SHARED_FILES: "true"
       COOKIES_FILE: /cookies/cookies.txt
       PLUGIN_DIR: /plugins
+      DENO_V8_FLAGS: "--max-old-space-size=256"
     ports:
       - "${WEBSUB_PORT:-8080}:8080"
     volumes:
