@@ -46,7 +46,8 @@ struct RawThumb {
     pub url: Option<String>,
 }
 
-static SEARCH_CACHE: Mutex<Option<HashMap<String, (Instant, Vec<SearchItem>)>>> = Mutex::new(None);
+type SearchCacheEntry = (Instant, Vec<SearchItem>);
+static SEARCH_CACHE: Mutex<Option<HashMap<String, SearchCacheEntry>>> = Mutex::new(None);
 
 fn get_cached(query: &str) -> Option<Vec<SearchItem>> {
     let mut guard = SEARCH_CACHE.lock().ok()?;

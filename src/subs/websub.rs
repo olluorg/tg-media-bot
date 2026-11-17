@@ -29,10 +29,9 @@ async fn handle_challenge(Query(params): Query<HashMap<String, String>>) -> impl
     let mode = params.get("hub.mode").map(String::as_str);
     let challenge = params.get("hub.challenge");
 
-    if (mode == Some("subscribe") || mode == Some("unsubscribe")) && challenge.is_some() {
-        let chal = challenge.unwrap().clone();
+    if let (Some("subscribe" | "unsubscribe"), Some(chal)) = (mode, challenge) {
         log::info!("WebSub challenge received for mode: {:?}, topic: {:?}", mode, params.get("hub.topic"));
-        (StatusCode::OK, chal)
+        (StatusCode::OK, chal.clone())
     } else {
         log::warn!("WebSub challenge invalid params: {:?}", params);
         (StatusCode::NOT_FOUND, "invalid challenge".to_string())

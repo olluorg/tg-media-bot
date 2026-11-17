@@ -877,9 +877,7 @@ impl Store {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = stmt.query_map(params![now as i64], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
-        });
+        let rows = stmt.query_map(params![now as i64], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64)));
         rows.map(|iter| iter.flatten().collect()).unwrap_or_default()
     }
 
@@ -913,11 +911,9 @@ impl Store {
         let mut count = 0;
         for &uid in user_ids {
             let cur: (i64, i64) = tx
-                .query_row(
-                    "SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1",
-                    params![uid],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
+                .query_row("SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1", params![uid], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .unwrap_or((0, 0));
             let start = if cur.0 != 0 && cur.1 > now { cur.1 } else { now };
             let new_exp = start + add_secs;
@@ -945,7 +941,9 @@ impl Store {
         );
         match res {
             Ok(_) => Ok(true),
-            Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 1555 || e.extended_code == 2067 => Ok(false),
+            Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 1555 || e.extended_code == 2067 => {
+                Ok(false)
+            }
             Err(e) => Err(e),
         }
     }
@@ -1037,11 +1035,9 @@ impl Store {
 
         // 6. Calculate new premium expiry and update user_premium
         let cur_prem: (i64, i64) = tx
-            .query_row(
-                "SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1",
-                params![user_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT is_premium, expires_at FROM user_premium WHERE user_id = ?1", params![user_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap_or((0, 0));
         let start_ts = if cur_prem.0 != 0 && cur_prem.1 > now { cur_prem.1 } else { now };
         let new_expires = (start_ts + (duration_days as i64) * 86400) as u64;
@@ -1057,11 +1053,7 @@ impl Store {
 
         tx.commit().map_err(|_| PromoError::DatabaseError)?;
 
-        Ok(ActivatePromoResult {
-            code: exact_code,
-            duration_days,
-            expires_at: new_expires,
-        })
+        Ok(ActivatePromoResult { code: exact_code, duration_days, expires_at: new_expires })
     }
 
     pub fn count_user_subscriptions(&self, user_id: i64) -> usize {
@@ -1170,6 +1162,7 @@ impl Store {
         let _ = conn.execute("UPDATE user_subscriptions SET is_paused = 1 WHERE user_id = ?1", params![user_id]);
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn get_next_channel_for_rss(
         &self,
         checked_before: u64,

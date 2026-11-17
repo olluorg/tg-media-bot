@@ -112,7 +112,11 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
                 if minimal { "включён" } else { "выключен" },
                 stats.total_downloads
             ),
-            if minimal { "🤫 Режим: Минимальный (вкл)" } else { "🤫 Режим: Обычный (выкл)" },
+            if minimal {
+                "🤫 Режим: Минимальный (вкл)"
+            } else {
+                "🤫 Режим: Обычный (выкл)"
+            },
             "🎚 Качество",
             "🌐 Язык",
             "📊 Моя статистика",
@@ -129,7 +133,11 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
                 if minimal { "увімкнено" } else { "вимкнено" },
                 stats.total_downloads
             ),
-            if minimal { "🤫 Режим: Мінімальний (увімк)" } else { "🤫 Режим: Звичайний (вимк)" },
+            if minimal {
+                "🤫 Режим: Мінімальний (увімк)"
+            } else {
+                "🤫 Режим: Звичайний (вимк)"
+            },
             "🎚 Якість",
             "🌐 Мова",
             "📊 Моя статистика",
@@ -385,8 +393,12 @@ fn premium_menu(app: &App, user_id: i64, lang: Lang) -> (String, Value) {
     let price_3m = app.cfg.stars_price_3m;
     let (btn_1m, btn_3m) = if is_premium {
         match lang {
-            Lang::Ru => (format!("➕ Продлить на 1 мес. — {price_1m} ⭐️"), format!("➕ Продлить на 3 мес. — {price_3m} ⭐️")),
-            Lang::Uk => (format!("➕ Подовжити на 1 міс. — {price_1m} ⭐️"), format!("➕ Подовжити на 3 міс. — {price_3m} ⭐️")),
+            Lang::Ru => {
+                (format!("➕ Продлить на 1 мес. — {price_1m} ⭐️"), format!("➕ Продлить на 3 мес. — {price_3m} ⭐️"))
+            }
+            Lang::Uk => {
+                (format!("➕ Подовжити на 1 міс. — {price_1m} ⭐️"), format!("➕ Подовжити на 3 міс. — {price_3m} ⭐️"))
+            }
             Lang::Es => (format!("➕ Renovar 1 mes — {price_1m} ⭐️"), format!("➕ Renovar 3 meses — {price_3m} ⭐️")),
             _ => (format!("➕ Extend 1 month — {price_1m} ⭐️"), format!("➕ Extend 3 months — {price_3m} ⭐️")),
         }
@@ -859,7 +871,7 @@ async fn handle_search_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, args: &
             }
 
             let token = new_session_token();
-            let total_pages = (items.len() + 2) / 3;
+            let total_pages = items.len().div_ceil(3);
             let page_0_items: Vec<_> = items.iter().take(3).collect();
             let count = page_0_items.len();
             let mut sent_msg_ids = Vec::new();
@@ -1628,14 +1640,12 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
             }
             if crate::subs::resolver::is_channel_url(url) {
                 handle_channel_subscription_request(app, ctx, url, Some(msg.message_id)).await;
-                return;
             } else {
                 let fail = match ctx.lang {
                     Lang::Ru => "⚠️ Пожалуйста, укажите корректную ссылку на YouTube-канал (например, <code>https://youtube.com/@имя_канала</code>).",
                     _ => "⚠️ Please provide a valid YouTube channel link (e.g. <code>https://youtube.com/@channel_name</code>).",
                 };
                 app.say(chat, thread, fail, None).await;
-                return;
             }
         }
         "lang" | "language" => app.say(chat, thread, LANG_PROMPT, Some(lang_keyboard())).await,
@@ -1738,7 +1748,7 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
         "settings" | "menu" => {
             let (text, kb) = settings_menu(app, ctx.user, ctx.chat, ctx.lang);
             app.say(chat, thread, &text, Some(kb)).await;
-        },
+        }
         "topic" => {
             if !msg.chat.is_group() {
                 app.say(chat, thread, t.topic_groups_only, None).await;
@@ -1907,7 +1917,11 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
             let max_uses = parts.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
             match app.store.create_promocode(code, days, max_uses) {
                 Ok(true) => {
-                    let limit_str = if max_uses == 0 { "безлимитно".to_string() } else { format!("{max_uses} активаций") };
+                    let limit_str = if max_uses == 0 {
+                        "безлимитно".to_string()
+                    } else {
+                        format!("{max_uses} активаций")
+                    };
                     let msg = format!("✅ Промокод <code>{code}</code> успешно создан!\n• Длительность: <b>{days} дней</b>\n• Лимит: <b>{limit_str}</b>");
                     app.say(chat, thread, &msg, None).await;
                 }
@@ -2086,7 +2100,10 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                     Lang::Es => "✨ Menú actualizado en español",
                     _ => "✨ Menu updated in English",
                 };
-                let _ = app.bot.send_message(msg.chat.id, msg.thread(), updated_menu_hint, Some(main_menu_keyboard(new)), None).await;
+                let _ = app
+                    .bot
+                    .send_message(msg.chat.id, msg.thread(), updated_menu_hint, Some(main_menu_keyboard(new)), None)
+                    .await;
             }
         }
         // Answer to "which quality?".
@@ -2201,7 +2218,6 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 }
                 let (text, kb) = premium_menu(app, cb.from.id, lang);
                 let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
-                return;
             } else if let Some(days_str) = rest.strip_prefix("buy:") {
                 let days: u32 = days_str.parse().unwrap_or(30);
                 let (title, desc, payload, amount) = match days {
@@ -2246,7 +2262,6 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
 
                 let _ = app.bot.send_invoice(msg.chat.id, title, desc, payload, "XTR", &prices).await;
                 app.bot.answer_callback(&cb.id, None, false).await;
-                return;
             } else if rest == "buy_disc:30" {
                 let amount = app.cfg.stars_discount_1m;
                 let (title, desc) = match lang {
@@ -2254,18 +2269,11 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                         "Продление Premium на 1 месяц (скидка!)",
                         "Специальная цена на продление: поиск, комментарии и подписки на 30 дней",
                     ),
-                    Lang::Uk => (
-                        "Подовження Premium на 1 місяць (знижка!)",
-                        "Спеціальна ціна на подовження на 30 днів",
-                    ),
-                    Lang::Es => (
-                        "Renovación Premium 1 mes (¡descuento!)",
-                        "Precio especial de renovación por 30 días",
-                    ),
-                    _ => (
-                        "Premium Renewal 1 month (discount!)",
-                        "Special renewal price for 30 days",
-                    ),
+                    Lang::Uk => {
+                        ("Подовження Premium на 1 місяць (знижка!)", "Спеціальна ціна на подовження на 30 днів")
+                    }
+                    Lang::Es => ("Renovación Premium 1 mes (¡descuento!)", "Precio especial de renovación por 30 días"),
+                    _ => ("Premium Renewal 1 month (discount!)", "Special renewal price for 30 days"),
                 };
                 let prices = vec![serde_json::json!({
                     "label": title,
@@ -2273,7 +2281,6 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 })];
                 let _ = app.bot.send_invoice(msg.chat.id, title, desc, "premium_30d_discount", "XTR", &prices).await;
                 app.bot.answer_callback(&cb.id, None, false).await;
-                return;
             } else if rest == "code_hint" {
                 let hint = match lang {
                     Lang::Ru => "🎟 Чтобы активировать промокод, отправьте боту команду:\n/promo ВАШ_ПРОМОКОД",
@@ -2282,7 +2289,6 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                     _ => "🎟 To activate a promo code, send the command:\n/promo YOUR_CODE",
                 };
                 app.bot.answer_callback(&cb.id, Some(hint), true).await;
-                return;
             } else if rest == "off" {
                 app.store.set_user_premium(cb.from.id, false, 0);
                 let alert = match lang {
@@ -2294,7 +2300,6 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 app.bot.answer_callback(&cb.id, Some(alert), false).await;
                 let (text, kb) = premium_menu(app, cb.from.id, lang);
                 let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
-                return;
             } else {
                 let is_on = rest == "on";
                 app.store.set_user_premium(cb.from.id, is_on, 0);
@@ -2403,7 +2408,7 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                                     .collect();
 
                                 let token = new_session_token();
-                                let total_pages = (items.len() + 2) / 3;
+                                let total_pages = items.len().div_ceil(3);
                                 let page_0_items: Vec<_> = items.iter().take(3).collect();
                                 let count = page_0_items.len();
                                 let mut sent_msg_ids = Vec::new();
@@ -2498,7 +2503,7 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                     app.bot.answer_callback(&cb.id, None, false).await;
 
                     let items = &session.items;
-                    let total_pages = (items.len() + 2) / 3;
+                    let total_pages = items.len().div_ceil(3);
                     if page >= total_pages {
                         return;
                     }
@@ -2698,7 +2703,9 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                         current_id = start_id - 1;
                         remaining -= ids.len();
                     }
-                    if let Ok(confirm_msg) = app.bot.send_message(msg.chat.id, msg.thread(), t.cleared, None, None).await {
+                    if let Ok(confirm_msg) =
+                        app.bot.send_message(msg.chat.id, msg.thread(), t.cleared, None, None).await
+                    {
                         let bot = app.bot.clone();
                         let chat_id = msg.chat.id;
                         tokio::spawn(async move {
@@ -2707,7 +2714,7 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                         });
                     }
                 }
-                "back" | _ => {
+                _ => {
                     app.bot.answer_callback(&cb.id, None, false).await;
                     let (text, kb) = settings_menu(app, cb.from.id, msg.chat.id, lang);
                     let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;

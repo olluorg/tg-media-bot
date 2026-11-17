@@ -142,6 +142,7 @@ fn random_delay(min: Duration, max: Duration) -> Duration {
     Duration::from_millis(min_ms + offset)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_feed_entries(
     channel_id: &str,
     channel_title: &str,

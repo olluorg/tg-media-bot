@@ -44,10 +44,10 @@ pub async fn run_notify_worker(app: Arc<App>, mut notify_rx: UnboundedReceiver<N
                 Err(e) => {
                     log::debug!("send_photo failed ({}), trying send_message", e);
                     let fallback_text = format!("{}\n\n🔗 {}", caption, video_url);
-                    if let Err(e2) = app.bot.send_message(user_id, None, &fallback_text, Some(kb), None).await {
-                        if let TgError::Api { code: 403, .. } = e2 {
-                            app.store.pause_user_subscriptions(user_id);
-                        }
+                    if let Err(TgError::Api { code: 403, .. }) =
+                        app.bot.send_message(user_id, None, &fallback_text, Some(kb), None).await
+                    {
+                        app.store.pause_user_subscriptions(user_id);
                     }
                 }
             }

@@ -48,7 +48,8 @@ struct RawComment {
     pub time_text: Option<String>,
 }
 
-static COMMENTS_CACHE: Mutex<Option<HashMap<String, (Instant, Option<String>, Vec<CommentItem>)>>> = Mutex::new(None);
+type CommentsCacheEntry = (Instant, Option<String>, Vec<CommentItem>);
+static COMMENTS_CACHE: Mutex<Option<HashMap<String, CommentsCacheEntry>>> = Mutex::new(None);
 
 fn get_cached(video_id: &str) -> Option<(Option<String>, Vec<CommentItem>)> {
     let mut guard = COMMENTS_CACHE.lock().ok()?;
@@ -196,7 +197,7 @@ pub fn render_comments_page(
         return (empty_text.to_string(), kb);
     }
 
-    let total_pages = (items.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+    let total_pages = items.len().div_ceil(PAGE_SIZE);
     let page = page.min(total_pages.saturating_sub(1));
     let start = page * PAGE_SIZE;
     let end = (start + PAGE_SIZE).min(items.len());
@@ -235,7 +236,7 @@ pub fn render_comments_page(
             badges,
             likes_str,
             time_str,
-            util::html_escape(&truncated_text)
+            util::html_escape(truncated_text)
         ));
     }
 
