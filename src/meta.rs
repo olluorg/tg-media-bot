@@ -85,6 +85,7 @@ impl RateLimiter {
 pub struct ResolvedMeta {
     pub title: Option<String>,
     pub thumb_url: Option<String>,
+    pub duration_secs: Option<u64>,
 }
 
 /// Instant thumbnail extraction for well-known patterns (like YouTube IDs), requiring 0 network roundtrips.
@@ -145,7 +146,19 @@ impl TitleResolver {
         let host_lower = host.to_ascii_lowercase();
 
         let result = if host_lower.contains("youtube.com") || host_lower.contains("youtu.be") {
-            self.fetch_youtube_oembed(url).await
+            let oembed = self.fetch_youtube_oembed(url).await;
+            match oembed {
+                Ok(mut meta) => {
+                    if let Ok(html_meta) = self.fetch_opengraph(url).await {
+                        meta.duration_secs = html_meta.duration_secs;
+                        if meta.title.is_none() {
+                            meta.title = html_meta.title;
+                        }
+                    }
+                    Ok(meta)
+                }
+                Err(_) => self.fetch_opengraph(url).await,
+            }
         } else if host_lower.contains("tiktok.com") {
             self.fetch_tiktok_oembed(url).await
         } else if host_lower.contains("vimeo.com") {
@@ -203,7 +216,7 @@ impl TitleResolver {
         let body: serde_json::Value = resp.json().await.map_err(|e| ResolveError::Other(e.to_string()))?;
         let title = body.get("title").and_then(|v| v.as_str()).map(html_unescape);
         let thumb_url = body.get("thumbnail_url").and_then(|v| v.as_str()).map(|s| s.to_string());
-        Ok(ResolvedMeta { title, thumb_url })
+        Ok(ResolvedMeta { title, thumb_url, duration_secs: None })
     }
 
     async fn fetch_tiktok_oembed(&self, url: &str) -> Result<ResolvedMeta, ResolveError> {
@@ -225,7 +238,8 @@ impl TitleResolver {
         let body: serde_json::Value = resp.json().await.map_err(|e| ResolveError::Other(e.to_string()))?;
         let title = body.get("title").and_then(|v| v.as_str()).map(html_unescape);
         let thumb_url = body.get("thumbnail_url").and_then(|v| v.as_str()).map(|s| s.to_string());
-        Ok(ResolvedMeta { title, thumb_url })
+        let duration_secs = body.get("duration").and_then(|v| v.as_u64());
+        Ok(ResolvedMeta { title, thumb_url, duration_secs })
     }
 
     async fn fetch_vimeo_oembed(&self, url: &str) -> Result<ResolvedMeta, ResolveError> {
@@ -247,7 +261,8 @@ impl TitleResolver {
         let body: serde_json::Value = resp.json().await.map_err(|e| ResolveError::Other(e.to_string()))?;
         let title = body.get("title").and_then(|v| v.as_str()).map(html_unescape);
         let thumb_url = body.get("thumbnail_url").and_then(|v| v.as_str()).map(|s| s.to_string());
-        Ok(ResolvedMeta { title, thumb_url })
+        let duration_secs = body.get("duration").and_then(|v| v.as_u64());
+        Ok(ResolvedMeta { title, thumb_url, duration_secs })
     }
 
     async fn fetch_opengraph(&self, url: &str) -> Result<ResolvedMeta, ResolveError> {
@@ -280,11 +295,49 @@ enum ResolveError {
     Other(String),
 }
 
-/// Simple, robust HTML parser to extract og:title, twitter:title, og:image, or <title>.
+/// Parse ISO 8601 duration (e.g. "PT1H23M45S", "PT15M33S", "PT45S") or raw seconds to u64 seconds.
+pub fn parse_iso8601_duration(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Ok(secs) = s.parse::<u64>() {
+        return Some(secs);
+    }
+    let s = s.strip_prefix("PT").or_else(|| s.strip_prefix("pt"))?;
+    let mut total = 0u64;
+    let mut num = 0u64;
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            num = num.saturating_mul(10).saturating_add(c as u64 - '0' as u64);
+        } else {
+            match c {
+                'H' | 'h' => {
+                    total = total.saturating_add(num.saturating_mul(3600));
+                    num = 0;
+                }
+                'M' | 'm' => {
+                    total = total.saturating_add(num.saturating_mul(60));
+                    num = 0;
+                }
+                'S' | 's' => {
+                    total = total.saturating_add(num);
+                    num = 0;
+                }
+                _ => {}
+            }
+        }
+    }
+    if total > 0 {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+/// Simple, robust HTML parser to extract og:title, twitter:title, og:image, duration, or <title>.
 pub fn parse_html_meta(html: &str) -> ResolvedMeta {
     let lower = html.to_ascii_lowercase();
     let mut title = None;
     let mut thumb_url = None;
+    let mut duration_secs = None;
 
     // 1. Look through <meta ...> tags
     let mut cursor = 0;
@@ -315,6 +368,19 @@ pub fn parse_html_meta(html: &str) -> ResolvedMeta {
                 }
             }
         }
+
+        if duration_secs.is_none()
+            && (tag_lower.contains("duration")
+                || tag_lower.contains("itemprop=\"duration\"")
+                || tag_lower.contains("og:video:duration")
+                || tag_lower.contains("video:duration"))
+        {
+            if let Some(content) = extract_attribute(tag, "content") {
+                if let Some(secs) = parse_iso8601_duration(content) {
+                    duration_secs = Some(secs);
+                }
+            }
+        }
     }
 
     // 2. Fallback to <title>...</title>
@@ -333,7 +399,29 @@ pub fn parse_html_meta(html: &str) -> ResolvedMeta {
         }
     }
 
-    ResolvedMeta { title, thumb_url }
+    // 3. Fallback for duration in embedded page JSON (YouTube, Rutube, etc.)
+    if duration_secs.is_none() {
+        if let Some(pos) = html.find("\"approxDurationMs\":\"") {
+            let after = &html[pos + 20..];
+            if let Some(end) = after.find('"') {
+                if let Ok(ms) = after[..end].parse::<u64>() {
+                    duration_secs = Some(ms / 1000);
+                }
+            }
+        }
+    }
+    if duration_secs.is_none() {
+        if let Some(pos) = html.find("\"lengthSeconds\":\"") {
+            let after = &html[pos + 17..];
+            if let Some(end) = after.find('"') {
+                if let Ok(secs) = after[..end].parse::<u64>() {
+                    duration_secs = Some(secs);
+                }
+            }
+        }
+    }
+
+    ResolvedMeta { title, thumb_url, duration_secs }
 }
 
 #[allow(dead_code)]
@@ -435,5 +523,14 @@ mod tests {
             quick_thumb("https://youtu.be/dQw4w9WgXcQ"),
             Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg".to_string())
         );
+
+        let html_dur1 = r#"<html><head><meta itemprop="duration" content="PT1H23M45S"></head></html>"#;
+        assert_eq!(parse_html_meta(html_dur1).duration_secs, Some(5025));
+
+        let html_dur2 = r#"<html><head><meta property="og:video:duration" content="180"></head></html>"#;
+        assert_eq!(parse_html_meta(html_dur2).duration_secs, Some(180));
+
+        let html_dur3 = r#"<html><body><script>var x = {"approxDurationMs":"90000"};</script></body></html>"#;
+        assert_eq!(parse_html_meta(html_dur3).duration_secs, Some(90));
     }
 }

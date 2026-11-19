@@ -218,7 +218,7 @@ pub fn cancel_markup(t: &Strings, id: &str) -> Value {
 
 pub fn lower_quality_keyboard(t: &Strings, token: &str, current: Quality) -> Option<Value> {
     let lower_heights: Vec<u32> = match current {
-        Quality::Max => vec![720, 480, 360],
+        Quality::Max => vec![1080, 720, 480, 360],
         Quality::Height(h) => Quality::HEIGHTS.into_iter().filter(|&cand| cand < h).collect(),
         Quality::Audio => vec![],
     };

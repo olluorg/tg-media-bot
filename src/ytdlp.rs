@@ -28,7 +28,7 @@ const PROGRESS_PREFIX: &str = "PROG|";
 const PROGRESS_TEMPLATE: &str =
     "download:PROG|%(progress._percent_str)s|%(progress.speed)s|%(progress.eta)s|%(progress.downloaded_bytes)s";
 /// Lower quality caps tried when a site's fragment URLs expire mid-download.
-const EXPIRY_LADDER: [u32; 3] = [720, 480, 360];
+const EXPIRY_LADDER: [u32; 4] = [1080, 720, 480, 360];
 const MAX_ATTEMPTS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -381,14 +381,15 @@ pub fn plan(info: &Info, kind: Kind, cap: u32, limit: u64, keep_codec: bool) -> 
             too_big = bytes;
             continue;
         }
-        // H.264 plays inline everywhere and needs no re-encode. Prefer it as
-        // long as that does not cost more than a drop to 720p.
-        let h264_ok = info
-            .formats
-            .iter()
-            .filter(|f| f.is_video() && f.is_h264())
-            .filter_map(Format::height)
-            .any(|h| h <= height && h >= height.min(720));
+        // H.264 plays inline everywhere and needs no re-encode. Prefer it for <= 1080p as
+        // long as that does not cost more than a drop to 720p. For 1440p+, prefer resolution.
+        let h264_ok = height <= 1080
+            && info
+                .formats
+                .iter()
+                .filter(|f| f.is_video() && f.is_h264())
+                .filter_map(Format::height)
+                .any(|h| h <= height && h >= height.min(720));
         let sort = if h264_ok { "vcodec:h264,res,fps,acodec:aac" } else { "res,fps,vcodec:h264,acodec:aac" };
         return Ok(Plan {
             selector: format!("bv*[height<=?{height}]+ba/b[height<=?{height}]/bv*+ba/b"),

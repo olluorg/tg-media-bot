@@ -142,7 +142,8 @@ fn decide(info: &MediaInfo, cfg: &Config) -> Action {
         return if info.is_mp4 && a_ok { Action::Keep } else { Action::Remux { aac: !a_ok } };
     }
     let short = info.duration > 0.0 && info.duration <= cfg.transcode_max_secs as f64;
-    if cfg.transcode == Transcode::Auto && short {
+    let high_res = info.height.is_some_and(|h| h > 1080);
+    if cfg.transcode == Transcode::Auto && short && !high_res {
         return Action::Transcode;
     }
     if !v_mp4 {

@@ -206,23 +206,35 @@ fn lang_keyboard() -> Value {
 }
 
 /// Buttons for every quality choice; `data` builds the callback payload.
-fn quality_rows(t: &Strings, max_height: u32, data: impl Fn(&str) -> String) -> Vec<Vec<Value>> {
+/// If `duration_secs` is given, heights whose estimated size exceeds `max_bytes` are omitted.
+fn quality_rows(
+    t: &Strings,
+    max_height: u32,
+    duration_secs: Option<u64>,
+    max_bytes: u64,
+    data: impl Fn(&str) -> String,
+) -> Vec<Vec<Value>> {
     let button = |q: Quality| json!({ "text": q.label(t), "callback_data": data(&q.code()) });
-    let mut rows = vec![vec![button(Quality::Max), button(Quality::Audio)]];
-    let heights: Vec<Value> =
-        Quality::HEIGHTS.into_iter().filter(|h| *h <= max_height).map(|h| button(Quality::Height(h))).collect();
-    for chunk in heights.chunks(2) {
+    let heights = Quality::heights_for_duration(max_height, duration_secs, max_bytes);
+    let mut rows = Vec::new();
+    if !heights.is_empty() {
+        rows.push(vec![button(Quality::Max), button(Quality::Audio)]);
+    } else {
+        rows.push(vec![button(Quality::Audio)]);
+    }
+    let height_buttons: Vec<Value> = heights.into_iter().map(|h| button(Quality::Height(h))).collect();
+    for chunk in height_buttons.chunks(2) {
         rows.push(chunk.to_vec());
     }
     rows
 }
 
-fn picker_keyboard(t: &Strings, token: &str, max_height: u32) -> Value {
-    json!({ "inline_keyboard": quality_rows(t, max_height, |code| format!("q:{token}:{code}")) })
+fn picker_keyboard(t: &Strings, token: &str, max_height: u32, duration_secs: Option<u64>, max_bytes: u64) -> Value {
+    json!({ "inline_keyboard": quality_rows(t, max_height, duration_secs, max_bytes, |code| format!("q:{token}:{code}")) })
 }
 
 fn default_keyboard(t: &Strings, max_height: u32) -> Value {
-    let mut rows = quality_rows(t, max_height, |code| format!("d:{code}"));
+    let mut rows = quality_rows(t, max_height, None, u64::MAX, |code| format!("d:{code}"));
     rows.push(vec![json!({ "text": t.btn_ask, "callback_data": "d:ask" })]);
     json!({ "inline_keyboard": rows })
 }
@@ -1175,13 +1187,56 @@ struct Ctx {
 /// Ask which quality to use for `urls` (one question for the whole message).
 async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, user_msg_id: Option<i64>) {
     let t = ctx.lang.t();
+    let mut duration_secs = None;
+    let mut title_opt = None;
+
+    if urls.len() == 1 {
+        let url = &urls[0];
+        let vkey = cachekey::video_key(url);
+        let candidates = vec![cachekey::request_key(&vkey, Quality::Max), cachekey::request_key(&vkey, Quality::Audio)];
+        if let Some(entry) = app.store.cache_find(&candidates) {
+            if entry.duration > 0 {
+                duration_secs = Some(entry.duration as u64);
+            }
+            if !entry.title.is_empty() {
+                title_opt = Some(entry.title);
+            }
+        }
+
+        if duration_secs.is_none() || title_opt.is_none() {
+            let meta = app.meta.resolve_meta(url).await;
+            if duration_secs.is_none() {
+                duration_secs = meta.duration_secs;
+            }
+            if title_opt.is_none() {
+                title_opt = meta.title;
+            }
+        }
+    }
+
     let text = if urls.len() == 1 {
-        t.ask_quality.to_string()
+        if let Some(title) = title_opt {
+            if let Some(dur) = duration_secs {
+                format!(
+                    "🎚 <b>{}</b>\n⏱ <b>{}</b>\n\n{}",
+                    util::html_escape(&title),
+                    util::fmt_duration(dur),
+                    t.ask_quality
+                )
+            } else {
+                format!("🎚 <b>{}</b>\n\n{}", util::html_escape(&title), t.ask_quality)
+            }
+        } else {
+            t.ask_quality.to_string()
+        }
     } else {
         fill(t.ask_quality_many, &[("n", &urls.len().to_string())])
     };
+
+    let limit_bytes = app.cfg.max_file_bytes.min(2000 * 1024 * 1024);
     let token = app.stash_urls(ctx.user, urls, user_msg_id);
-    app.say(ctx.chat, ctx.thread, &text, Some(picker_keyboard(t, &token, app.cfg.max_height))).await;
+    let kb = picker_keyboard(t, &token, app.cfg.max_height, duration_secs, limit_bytes);
+    app.say(ctx.chat, ctx.thread, &text, Some(kb)).await;
 }
 
 /// Queue `urls` with `quality` and report the result. `picker` is the
@@ -2681,7 +2736,7 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                         Lang::Es => format!("🎚 <b>Selecciona la calidad predeterminada</b>\nActual: <b>{cur_q}</b>"),
                         _ => format!("🎚 <b>Select default quality</b>\nCurrent: <b>{cur_q}</b>"),
                     };
-                    let mut rows = quality_rows(t, app.cfg.max_height, |code| format!("d:{code}"));
+                    let mut rows = quality_rows(t, app.cfg.max_height, None, u64::MAX, |code| format!("d:{code}"));
                     rows.push(vec![json!({ "text": t.btn_ask, "callback_data": "d:ask" })]);
                     rows.push(vec![json!({ "text": back_btn, "callback_data": "cfg:back" })]);
                     let kb = json!({ "inline_keyboard": rows });
@@ -3137,7 +3192,7 @@ mod tests {
     fn keyboards_fit_callback_limits() {
         for kb in [
             lang_keyboard(),
-            picker_keyboard(Lang::Uk.t(), "ffffffabc", 1080),
+            picker_keyboard(Lang::Uk.t(), "ffffffabc", 1080, None, u64::MAX),
             default_keyboard(Lang::Es.t(), 1080),
             stats_keyboard(),
             top_keyboard(0),
@@ -3148,10 +3203,25 @@ mod tests {
                 }
             }
         }
-        let all = picker_keyboard(Lang::En.t(), "t", 480).to_string();
+        let all = picker_keyboard(Lang::En.t(), "t", 480, None, u64::MAX).to_string();
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
+
+        // Formula filtering for long videos (limit: 2000 MB)
+        let limit_2gb = 2000 * 1024 * 1024;
+        let short_kb = picker_keyboard(Lang::En.t(), "t", 1440, Some(600), limit_2gb).to_string();
+        assert!(short_kb.contains("q:t:1440"));
+        assert!(short_kb.contains("q:t:1080"));
+
+        let mid_kb = picker_keyboard(Lang::En.t(), "t", 1440, Some(2100), limit_2gb).to_string();
+        assert!(!mid_kb.contains("q:t:1440"));
+        assert!(mid_kb.contains("q:t:1080"));
+
+        let long_kb = picker_keyboard(Lang::En.t(), "t", 1440, Some(4500), limit_2gb).to_string();
+        assert!(!long_kb.contains("q:t:1440"));
+        assert!(!long_kb.contains("q:t:1080"));
+        assert!(long_kb.contains("q:t:720"));
         assert_eq!(command_list(Lang::Ru.t()).len(), 14);
         assert!(command_list(Lang::Ru.t()).iter().any(|(cmd, _)| *cmd == "promo"));
         assert!(command_list(Lang::Ru.t()).iter().any(|(cmd, _)| *cmd == "search"));
