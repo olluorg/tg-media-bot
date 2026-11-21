@@ -19,6 +19,16 @@ const COMMENTS_TIMEOUT: Duration = Duration::from_secs(25);
 const CACHE_TTL: Duration = Duration::from_secs(600); // 10 minutes
 pub const PAGE_SIZE: usize = 5;
 
+pub(crate) fn button(video_id: &str, lang: Lang) -> Value {
+    let text = match lang {
+        Lang::Ru => "💬 Комментарии",
+        Lang::Uk => "💬 Коментарі",
+        Lang::Es => "💬 Comentarios",
+        _ => "💬 Comments",
+    };
+    json!({ "text": text, "callback_data": format!("comm:{video_id}:0") })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommentItem {
     pub id: String,

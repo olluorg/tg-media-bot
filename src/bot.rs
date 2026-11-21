@@ -229,8 +229,19 @@ fn quality_rows(
     rows
 }
 
-fn picker_keyboard(t: &Strings, token: &str, max_height: u32, duration_secs: Option<u64>, max_bytes: u64) -> Value {
-    json!({ "inline_keyboard": quality_rows(t, max_height, duration_secs, max_bytes, |code| format!("q:{token}:{code}")) })
+fn picker_keyboard(
+    lang: Lang,
+    token: &str,
+    max_height: u32,
+    duration_secs: Option<u64>,
+    max_bytes: u64,
+    youtube_id: Option<&str>,
+) -> Value {
+    let mut rows = quality_rows(lang.t(), max_height, duration_secs, max_bytes, |code| format!("q:{token}:{code}"));
+    if let Some(id) = youtube_id {
+        rows.push(vec![crate::comments::button(id, lang)]);
+    }
+    json!({ "inline_keyboard": rows })
 }
 
 fn default_keyboard(t: &Strings, max_height: u32) -> Value {
@@ -785,19 +796,19 @@ fn render_card_markup(
     lang: Lang,
     page_nav: Option<(usize, usize, &str, &str)>,
 ) -> Value {
-    let (dl_video_btn, dl_audio_btn, comm_btn) = match lang {
-        Lang::Ru => ("🎬 Скачать", "🎵 MP3", "💬 Комментарии"),
-        Lang::Uk => ("🎬 Завантажити", "🎵 MP3", "💬 Коментарі"),
-        Lang::Es => ("🎬 Descargar", "🎵 MP3", "💬 Comentarios"),
-        _ => ("🎬 Download", "🎵 MP3", "💬 Comments"),
+    let dl_video_btn = match lang {
+        Lang::Ru => "🎬 Скачать",
+        Lang::Uk => "🎬 Завантажити",
+        Lang::Es => "🎬 Descargar",
+        _ => "🎬 Download",
     };
 
     let mut rows = vec![
         vec![
             json!({ "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) }),
-            json!({ "text": dl_audio_btn, "callback_data": format!("s:dl:a:{}", item.id) }),
+            json!({ "text": "🎵 MP3", "callback_data": format!("s:dl:a:{}", item.id) }),
         ],
-        vec![json!({ "text": comm_btn, "callback_data": format!("comm:{}:0", item.id) })],
+        vec![crate::comments::button(&item.id, lang)],
     ];
 
     if let Some((page, total_pages, prefix, token)) = page_nav {
@@ -1189,6 +1200,7 @@ async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, user_msg_id: 
     let t = ctx.lang.t();
     let mut duration_secs = None;
     let mut title_opt = None;
+    let mut video_key = None;
 
     if urls.len() == 1 {
         let url = &urls[0];
@@ -1212,6 +1224,7 @@ async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, user_msg_id: 
                 title_opt = meta.title;
             }
         }
+        video_key = Some(vkey);
     }
 
     let text = if urls.len() == 1 {
@@ -1235,7 +1248,8 @@ async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, user_msg_id: 
 
     let limit_bytes = app.cfg.max_file_bytes.min(2000 * 1024 * 1024);
     let token = app.stash_urls(ctx.user, urls, user_msg_id);
-    let kb = picker_keyboard(t, &token, app.cfg.max_height, duration_secs, limit_bytes);
+    let youtube_id = video_key.as_deref().and_then(|key| key.strip_prefix("youtube:"));
+    let kb = picker_keyboard(ctx.lang, &token, app.cfg.max_height, duration_secs, limit_bytes, youtube_id);
     app.say(ctx.chat, ctx.thread, &text, Some(kb)).await;
 }
 
@@ -3190,35 +3204,37 @@ mod tests {
 
     #[test]
     fn keyboards_fit_callback_limits() {
-        for kb in [
-            lang_keyboard(),
-            picker_keyboard(Lang::Uk.t(), "ffffffabc", 1080, None, u64::MAX),
-            default_keyboard(Lang::Es.t(), 1080),
-            stats_keyboard(),
-            top_keyboard(0),
-        ] {
+        let youtube_picker = picker_keyboard(Lang::Ru, "ffffffabc", 1080, None, u64::MAX, Some("dQw4w9WgXcQ"));
+        assert_eq!(
+            youtube_picker["inline_keyboard"].as_array().unwrap().last().unwrap(),
+            &json!([{ "text": "💬 Комментарии", "callback_data": "comm:dQw4w9WgXcQ:0" }])
+        );
+        for kb in
+            [lang_keyboard(), youtube_picker, default_keyboard(Lang::Es.t(), 1080), stats_keyboard(), top_keyboard(0)]
+        {
             for row in kb["inline_keyboard"].as_array().unwrap() {
                 for b in row.as_array().unwrap() {
                     assert!(b["callback_data"].as_str().unwrap().len() <= 64);
                 }
             }
         }
-        let all = picker_keyboard(Lang::En.t(), "t", 480, None, u64::MAX).to_string();
+        let all = picker_keyboard(Lang::En, "t", 480, None, u64::MAX, None).to_string();
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
+        assert!(!all.contains("comm:"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
 
         // Formula filtering for long videos (limit: 2000 MB)
         let limit_2gb = 2000 * 1024 * 1024;
-        let short_kb = picker_keyboard(Lang::En.t(), "t", 1440, Some(600), limit_2gb).to_string();
+        let short_kb = picker_keyboard(Lang::En, "t", 1440, Some(600), limit_2gb, None).to_string();
         assert!(short_kb.contains("q:t:1440"));
         assert!(short_kb.contains("q:t:1080"));
 
-        let mid_kb = picker_keyboard(Lang::En.t(), "t", 1440, Some(2100), limit_2gb).to_string();
+        let mid_kb = picker_keyboard(Lang::En, "t", 1440, Some(2100), limit_2gb, None).to_string();
         assert!(!mid_kb.contains("q:t:1440"));
         assert!(mid_kb.contains("q:t:1080"));
 
-        let long_kb = picker_keyboard(Lang::En.t(), "t", 1440, Some(4500), limit_2gb).to_string();
+        let long_kb = picker_keyboard(Lang::En, "t", 1440, Some(4500), limit_2gb, None).to_string();
         assert!(!long_kb.contains("q:t:1440"));
         assert!(!long_kb.contains("q:t:1080"));
         assert!(long_kb.contains("q:t:720"));
