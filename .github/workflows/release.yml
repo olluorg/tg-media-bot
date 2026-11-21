@@ -17,8 +17,14 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   # ---- standalone binaries (static, musl) -------------------------------------
   binary:
+    needs: check
     name: Binary ${{ matrix.arch }}
     strategy:
       fail-fast: false
@@ -63,6 +69,7 @@ jobs:
 
   # ---- docker image: one native build per arch, then a multi-arch manifest -----
   docker:
+    needs: check
     name: Docker ${{ matrix.platform }}
     strategy:
       fail-fast: false

@@ -212,19 +212,31 @@ enum JobError {
     Upload { size: u64, err: TgError },
 }
 
-pub fn cancel_markup(t: &Strings, id: &str) -> Value {
-    json!({ "inline_keyboard": [[{ "text": t.btn_cancel, "callback_data": format!("c:{id}") }]] })
+fn download_status_markup(job: &Job) -> Value {
+    let mut rows = vec![vec![json!({ "text": job.lang.t().btn_cancel, "callback_data": format!("c:{}", job.id) })]];
+    if let Some(id) = job.video_key.strip_prefix("youtube:") {
+        rows.push(vec![crate::comments::button(id, job.lang)]);
+    }
+    json!({ "inline_keyboard": rows })
 }
 
-pub fn lower_quality_keyboard(t: &Strings, token: &str, current: Quality) -> Option<Value> {
-    let lower_heights: Vec<u32> = match current {
-        Quality::Max => vec![1080, 720, 480, 360],
-        Quality::Height(h) => Quality::HEIGHTS.into_iter().filter(|&cand| cand < h).collect(),
-        Quality::Audio => vec![],
+fn retry_markup(job: &Job, token: &str) -> Value {
+    let label = match job.lang {
+        Lang::Ru => "🔄 Повторить",
+        Lang::Uk => "🔄 Повторити",
+        Lang::Es => "🔄 Reintentar",
+        _ => "🔄 Retry",
     };
+    json!({ "inline_keyboard": [[{ "text": label, "callback_data": format!("q:{token}:{}", job.quality.code()) }]] })
+}
+
+pub fn lower_quality_keyboard(t: &Strings, token: &str, current: Quality, max_height: u32) -> Option<Value> {
+    let ceiling = current.cap().unwrap_or(max_height);
+    let lower_heights = Quality::HEIGHTS
+        .into_iter()
+        .filter(|&height| current.kind() == Kind::Video && height < ceiling && height <= max_height);
 
     let mut buttons: Vec<Value> = lower_heights
-        .into_iter()
         .map(|h| {
             let q = Quality::Height(h);
             json!({ "text": q.label(t), "callback_data": format!("q:{token}:{}", q.code()) })
@@ -669,7 +681,7 @@ impl App {
                 if changed {
                     if let Some(msg_id) = app.status_msg(&job_arc.id) {
                         if !job_arc.minimal {
-                            let markup = cancel_markup(job_arc.lang.t(), &job_arc.id);
+                            let markup = download_status_markup(&job_arc);
                             let text = render_status(&job_arc);
                             app.edit_status(&job_arc, msg_id, &text, Some(markup)).await;
                         }
@@ -963,7 +975,7 @@ impl App {
 
     async fn status_loop(&self, job: &Job, msg_id: i64) {
         let interval = Duration::from_secs(self.cfg.progress_interval);
-        let markup = cancel_markup(job.lang.t(), &job.id);
+        let markup = download_status_markup(job);
         let mut rx = job.stage.subscribe();
         let mut last_text = String::new();
         let mut last_pct: Option<f32> = None;
@@ -1200,6 +1212,7 @@ impl App {
                             true,
                             "success",
                             None,
+                            Some(&job.quality.code()),
                         );
                         self.store.cache_put(&store_keys(job, &probed), entry);
                         return Ok(());
@@ -1244,6 +1257,7 @@ impl App {
                         false,
                         "success",
                         None,
+                        Some(&job.quality.code()),
                     );
                     if let Some(entry) = cache_entry(&msg, &ready) {
                         self.store.cache_put(&store_keys(job, &ready.probed), entry);
@@ -1282,6 +1296,7 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                 true,
                 "success",
                 None,
+                Some(&job.quality.code()),
             );
             if let Some(msg) = app.status_msg(&job.id) {
                 let _ = app.bot.delete_message(job.chat_id, msg).await;
@@ -1303,7 +1318,7 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
     // 3. Now the job is live: give it a status message.
     let mut status_msg = app.status_msg(&job.id);
     if status_msg.is_none() && !job.minimal {
-        let markup = cancel_markup(job.lang.t(), &job.id);
+        let markup = download_status_markup(&job);
         status_msg = app.deliver_status(&job, Some(markup)).await;
         if let Some(id) = status_msg {
             app.set_status_msg(&job.id, id);
@@ -1372,7 +1387,7 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                 JobError::Dl(DlError::Internal(_)) => "Внутренняя ошибка",
                 _ => "Другая ошибка",
             };
-            app.stats.record_download(job.user_id, &job.url, kind_str, 0, 0, false, "error", Some(error_reason));
+            app.stats.record_download(job.user_id, &job.url, kind_str, 0, 0, false, "error", Some(error_reason), None);
             match &err {
                 JobError::Dl(DlError::Internal(e)) => log::error!("job {} internal error: {e}", job.id),
                 JobError::Upload { err, .. } => log::error!("job {} upload failed: {err}", job.id),
@@ -1395,14 +1410,27 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
                                 crate::telegram::TgError::Api { desc, .. } => desc.to_lowercase(),
                                 crate::telegram::TgError::Net(s) => s.to_lowercase(),
                             };
-                            desc.contains("too large") || desc.contains("too big") || desc.contains("entity too large")
+                            err.code() == Some(413) || desc.contains("too large") || desc.contains("too big")
                         }
                         _ => false,
                     };
 
-            let markup = if is_size_error {
+            let transient = match &err {
+                JobError::Dl(DlError::DownloadTimeout | DlError::ProbeTimeout) => true,
+                JobError::Dl(DlError::Failed(raw)) => {
+                    matches!(crate::ytdlp::classify(raw), Some(Hint::Network | Hint::RateLimited))
+                }
+                JobError::Upload { err, .. } => {
+                    matches!(err, TgError::Net(_)) || matches!(err.code(), Some(429 | 500..=599))
+                }
+                _ => false,
+            };
+            let markup = if is_size_error && job.quality.kind() == Kind::Video {
                 let token = app.stash_urls(job.user_id, vec![job.url.clone()], job.user_msg_id);
-                lower_quality_keyboard(job.lang.t(), &token, job.quality)
+                lower_quality_keyboard(job.lang.t(), &token, job.quality, app.cfg.max_height)
+            } else if !is_size_error && transient {
+                let token = app.stash_urls(job.user_id, vec![job.url.clone()], job.user_msg_id);
+                Some(retry_markup(&job, &token))
             } else {
                 None
             };

@@ -293,51 +293,58 @@ impl Store {
             if let Ok(bytes) = std::fs::read(&json_path) {
                 if let Ok(data) = serde_json::from_slice::<LegacyData>(&bytes) {
                     log::info!("migrating existing state.json into bot.db…");
-                    if let Ok(tx) = conn.unchecked_transaction() {
+                    let migrate = || -> rusqlite::Result<()> {
+                        let tx = conn.unchecked_transaction()?;
                         for (chat_id, cfg) in data.chats {
                             let lang_str = cfg.lang.map(|l| l.code().to_string());
-                            let _ = tx.execute(
+                            tx.execute(
                                 "INSERT OR REPLACE INTO chats (chat_id, lang, minimal, topic, active) VALUES (?1, ?2, ?3, ?4, ?5)",
                                 params![chat_id, lang_str, if cfg.minimal { 1 } else { 0 }, cfg.topic, if cfg.active { 1 } else { 0 }],
-                            );
+                            )?;
                         }
                         for (user_id, q) in data.quality {
-                            let _ = tx.execute(
+                            tx.execute(
                                 "INSERT OR REPLACE INTO user_quality (user_id, quality) VALUES (?1, ?2)",
                                 params![user_id, q],
-                            );
+                            )?;
                         }
                         for user_id in data.audio_users {
-                            let _ = tx.execute(
+                            tx.execute(
                                 "INSERT OR IGNORE INTO user_quality (user_id, quality) VALUES (?1, 'audio')",
                                 params![user_id],
-                            );
+                            )?;
                         }
                         for (key, entry) in data.cache {
-                            let _ = tx.execute(
+                            tx.execute(
                                 "INSERT OR REPLACE INTO media_cache (key, kind, file_id, title, performer, duration, size, ts)
                                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                                 params![key, entry.kind, entry.file_id, entry.title, entry.performer, entry.duration, entry.size as i64, entry.ts as i64],
-                            );
+                            )?;
                         }
                         for (key, title) in data.titles {
-                            let _ = tx.execute(
+                            tx.execute(
                                 "INSERT OR REPLACE INTO titles_cache (key, title, thumb_url, ts)
                                  VALUES (?1, ?2, ?3, ?4)",
                                 params![key, title.title, title.thumb_url, title.ts as i64],
-                            );
+                            )?;
                         }
                         for (id, job) in data.jobs {
-                            let _ = tx.execute(
+                            tx.execute(
                                 "INSERT OR REPLACE INTO saved_jobs (id, user_id, chat_id, thread_id, url, quality, lang, status_msg, user_msg_id, created_at)
                                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                                 params![id, job.user_id, job.chat_id, job.thread_id, job.url, job.quality, job.lang.code(), job.status_msg, job.user_msg_id, job.created_at as i64],
-                            );
+                            )?;
                         }
-                        if tx.commit().is_ok() {
+                        tx.commit()
+                    };
+                    match migrate() {
+                        Ok(()) => {
                             log::info!("state.json successfully migrated to bot.db");
-                            let _ = std::fs::rename(&json_path, data_dir.join("state.json.migrated"));
+                            if let Err(e) = std::fs::rename(&json_path, data_dir.join("state.json.migrated")) {
+                                log::warn!("could not archive migrated state.json: {e}");
+                            }
                         }
+                        Err(e) => log::warn!("could not migrate state.json: {e}"),
                     }
                 }
             }

@@ -59,25 +59,11 @@ pub async fn run_notify_worker(app: Arc<App>, mut notify_rx: UnboundedReceiver<N
 }
 
 fn format_notification_card(notif: &NewVideoNotification, video_url: &str, lang: crate::i18n::Lang) -> (String, Value) {
-    let (header, watch_btn, dl_video_btn, dl_audio_btn, unsub_btn) = match lang {
-        crate::i18n::Lang::Ru => {
-            ("🎬 <b>Новое видео на канале</b>", "▶️ Смотреть", "📥 Скачать видео", "🎵 Скачать MP3", "🔕 Отписаться")
-        }
-        crate::i18n::Lang::Uk => (
-            "🎬 <b>Нове відео на каналі</b>",
-            "▶️ Дивитися",
-            "📥 Завантажити відео",
-            "🎵 Завантажити MP3",
-            "🔕 Відписатися",
-        ),
-        crate::i18n::Lang::Es => (
-            "🎬 <b>Nuevo video en el canal</b>",
-            "▶️ Ver",
-            "📥 Descargar video",
-            "🎵 Descargar MP3",
-            "🔕 Desuscribirse",
-        ),
-        _ => ("🎬 <b>New video on channel</b>", "▶️ Watch", "📥 Download video", "🎵 Download MP3", "🔕 Unsubscribe"),
+    let (header, watch_btn, unsub_btn) = match lang {
+        crate::i18n::Lang::Ru => ("🎬 <b>Новое видео на канале</b>", "▶️ Смотреть", "🔕 Отписаться"),
+        crate::i18n::Lang::Uk => ("🎬 <b>Нове відео на каналі</b>", "▶️ Дивитися", "🔕 Відписатися"),
+        crate::i18n::Lang::Es => ("🎬 <b>Nuevo video en el canal</b>", "▶️ Ver", "🔕 Desuscribirse"),
+        _ => ("🎬 <b>New video on channel</b>", "▶️ Watch", "🔕 Unsubscribe"),
     };
 
     let caption = format!(
@@ -87,28 +73,12 @@ fn format_notification_card(notif: &NewVideoNotification, video_url: &str, lang:
         util::html_escape(&notif.video_title)
     );
 
-    let comm_btn = match lang {
-        crate::i18n::Lang::Ru => "💬 Комментарии",
-        crate::i18n::Lang::Uk => "💬 Коментарі",
-        crate::i18n::Lang::Es => "💬 Comentarios",
-        _ => "💬 Comments",
-    };
-
-    let kb = json!({
-        "inline_keyboard": [
-            [
-                { "text": watch_btn, "url": video_url }
-            ],
-            [
-                { "text": dl_video_btn, "callback_data": format!("sub:dl:v:{}", notif.video_id) },
-                { "text": dl_audio_btn, "callback_data": format!("sub:dl:a:{}", notif.video_id) }
-            ],
-            [
-                { "text": comm_btn, "callback_data": format!("comm:{}:0", notif.video_id) },
-                { "text": unsub_btn, "callback_data": format!("sub:unsub:{}", notif.channel_id) }
-            ]
-        ]
-    });
+    let mut rows = vec![vec![json!({ "text": watch_btn, "url": video_url })]];
+    rows.extend(crate::bot::video_action_rows(lang, &notif.video_id, |kind| {
+        format!("sub:dl:{kind}:{}", notif.video_id)
+    }));
+    rows.push(vec![json!({ "text": unsub_btn, "callback_data": format!("sub:unsub:{}", notif.channel_id) })]);
+    let kb = json!({ "inline_keyboard": rows });
 
     (caption, kb)
 }

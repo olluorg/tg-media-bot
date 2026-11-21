@@ -29,6 +29,7 @@ pub fn command_list(t: &Strings) -> Vec<(&'static str, &'static str)> {
         ("subscriptions", t.c_subscriptions),
         ("quality", t.c_quality),
         ("status", t.c_status),
+        ("history", t.c_history),
         ("mystats", t.c_mystats),
         ("cancel", t.c_cancel),
         ("clear", t.c_clear),
@@ -239,7 +240,16 @@ fn picker_keyboard(
 ) -> Value {
     let mut rows = quality_rows(lang.t(), max_height, duration_secs, max_bytes, |code| format!("q:{token}:{code}"));
     if let Some(id) = youtube_id {
-        rows.push(vec![crate::comments::button(id, lang)]);
+        let mut actions = video_action_rows(lang, id, |kind| {
+            let code = if kind == "a" { "audio" } else { "max" };
+            format!("q:{token}:{code}")
+        });
+        let mut download_row = actions.remove(0);
+        if rows[0].len() == 1 {
+            download_row.remove(0);
+        }
+        rows[0] = download_row;
+        rows.extend(actions);
     }
     json!({ "inline_keyboard": rows })
 }
@@ -791,25 +801,28 @@ fn render_card_content(item: &crate::search::SearchItem) -> (String, String) {
     (caption, thumb_url)
 }
 
-fn render_card_markup(
-    item: &crate::search::SearchItem,
-    lang: Lang,
-    page_nav: Option<(usize, usize, &str, &str)>,
-) -> Value {
-    let dl_video_btn = match lang {
+pub(crate) fn video_action_rows(lang: Lang, id: &str, download: impl Fn(&str) -> String) -> Vec<Vec<Value>> {
+    let video_label = match lang {
         Lang::Ru => "🎬 Скачать",
         Lang::Uk => "🎬 Завантажити",
         Lang::Es => "🎬 Descargar",
         _ => "🎬 Download",
     };
-
-    let mut rows = vec![
+    vec![
         vec![
-            json!({ "text": dl_video_btn, "callback_data": format!("s:dl:v:{}", item.id) }),
-            json!({ "text": "🎵 MP3", "callback_data": format!("s:dl:a:{}", item.id) }),
+            json!({ "text": video_label, "callback_data": download("v") }),
+            json!({ "text": "🎵 MP3", "callback_data": download("a") }),
         ],
-        vec![crate::comments::button(&item.id, lang)],
-    ];
+        vec![crate::comments::button(id, lang)],
+    ]
+}
+
+fn render_card_markup(
+    item: &crate::search::SearchItem,
+    lang: Lang,
+    page_nav: Option<(usize, usize, &str, &str)>,
+) -> Value {
+    let mut rows = video_action_rows(lang, &item.id, |kind| format!("s:dl:{kind}:{}", item.id));
 
     if let Some((page, total_pages, prefix, token)) = page_nav {
         if total_pages > 1 {
@@ -1195,6 +1208,50 @@ struct Ctx {
     lang: Lang,
 }
 
+async fn preview_playlist(app: &Arc<App>, ctx: &Ctx, url: &str, room: usize, user_msg_id: i64) {
+    let limit = room.min(MAX_LINKS_PER_MESSAGE);
+    let (heading, first, all, unavailable) = match ctx.lang {
+        Lang::Ru => ("📋 Видео в плейлисте", "Первое видео", "Весь плейлист", "Не удалось получить видео плейлиста."),
+        Lang::Uk => ("📋 Відео в плейлисті", "Перше відео", "Увесь плейлист", "Не вдалося отримати відео з плейлиста."),
+        Lang::Es => (
+            "📋 Vídeos de la lista",
+            "Primer vídeo",
+            "Lista completa",
+            "No se pudieron obtener los vídeos de la lista.",
+        ),
+        _ => ("📋 Videos in playlist", "First video", "Whole playlist", "Could not load videos from the playlist."),
+    };
+    let videos =
+        match crate::search::list_youtube(&app.cfg, &app.search_slots, url, MAX_LINKS_PER_MESSAGE + 1, true).await {
+            Ok(videos) if !videos.is_empty() => videos,
+            _ => {
+                app.say(ctx.chat, ctx.thread, unavailable, None).await;
+                return;
+            }
+        };
+    let capped = videos.len() > limit;
+    let count = format!("{}{}", videos.len(), if videos.len() > MAX_LINKS_PER_MESSAGE { "+" } else { "" });
+    let mut text = format!("{heading} · <b>{count}</b>");
+    for video in videos.iter().take(3) {
+        text.push_str(&format!("\n• {}", util::html_escape(util::truncate_chars(&video.title, 120))));
+    }
+    let urls = videos.into_iter().take(limit).map(|video| video.url).collect::<Vec<_>>();
+    let available = urls.len();
+    let token = app.stash_urls(ctx.user, urls, Some(user_msg_id));
+    let mut row = vec![json!({ "text": first, "callback_data": format!("pl:{token}:1") })];
+    for size in [Some(3).filter(|&n| n < available), Some(available).filter(|&n| n > 1)].into_iter().flatten() {
+        let label = match (size == available && !capped, ctx.lang) {
+            (true, _) => all.to_string(),
+            (_, Lang::Ru) => format!("Первые {size}"),
+            (_, Lang::Uk) => format!("Перші {size}"),
+            (_, Lang::Es) => format!("Primeros {size}"),
+            _ => format!("First {size}"),
+        };
+        row.push(json!({ "text": label, "callback_data": format!("pl:{token}:{size}") }));
+    }
+    app.say(ctx.chat, ctx.thread, &text, Some(json!({ "inline_keyboard": [row] }))).await;
+}
+
 /// Ask which quality to use for `urls` (one question for the whole message).
 async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, user_msg_id: Option<i64>) {
     let t = ctx.lang.t();
@@ -1519,6 +1576,12 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
         app.say(ctx.chat, ctx.thread, &text, None).await;
         return;
     }
+    if let [url] = urls.as_slice() {
+        if let Some(playlist) = cachekey::youtube_playlist_url(url) {
+            preview_playlist(app, &ctx, &playlist, room, msg.message_id).await;
+            return;
+        }
+    }
     match app.store.default_quality(user.id) {
         Some(q) => enqueue_all(app, &ctx, urls, q, None, Some(msg.message_id)).await,
         None => ask_quality(app, &ctx, urls, Some(msg.message_id)).await,
@@ -1778,6 +1841,30 @@ async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: 
                 app.say(chat, thread, t.formats_usage, None).await;
             } else {
                 ask_quality(app, ctx, urls, Some(msg.message_id)).await;
+            }
+        }
+        "history" if msg.chat.kind == "private" => {
+            let (heading, empty, resend) = match ctx.lang {
+                Lang::Ru => ("Недавние загрузки", "У вас пока нет завершённых загрузок.", "Отправить ещё раз"),
+                Lang::Uk => ("Недавні завантаження", "У вас ще немає завершених завантажень.", "Надіслати ще раз"),
+                Lang::Es => ("Descargas recientes", "Todavía no tienes descargas completadas.", "Enviar de nuevo"),
+                _ => ("Recent downloads", "You have no completed downloads yet.", "Send again"),
+            };
+            let items = app.stats.recent_downloads(ctx.user);
+            let mut text = format!("📥 <b>{heading}</b>");
+            let mut rows = Vec::new();
+            for (index, (id, url, kind)) in items.into_iter().enumerate() {
+                let key = cachekey::video_key(&url);
+                let title = app.store.title_find(&key).filter(|s| !s.is_empty()).unwrap_or_else(|| url.clone());
+                let n = index + 1;
+                let icon = if kind == "audio" { "🎵" } else { "🎬" };
+                text.push_str(&format!("\n{n}. {icon} {}", util::html_escape(util::truncate_chars(&title, 100))));
+                rows.push(vec![json!({ "text": format!("{n}. {resend}"), "callback_data": format!("hist:{id}") })]);
+            }
+            if rows.is_empty() {
+                app.say(chat, thread, empty, None).await;
+            } else {
+                app.say(chat, thread, &text, Some(json!({ "inline_keyboard": rows }))).await;
             }
         }
         "status" => {
@@ -2155,6 +2242,21 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
 
     let (prefix, rest) = data.split_once(':').unwrap_or((data.as_str(), ""));
     match prefix {
+        "hist" if msg.chat.kind == "private" => {
+            let item = rest.parse().ok().and_then(|id| app.stats.download_for_user(cb.from.id, id));
+            let Some((url, kind, quality)) = item else {
+                app.bot.answer_callback(&cb.id, Some(t.picker_expired), true).await;
+                return;
+            };
+            app.bot.answer_callback(&cb.id, None, false).await;
+            let quality = quality.as_deref().and_then(Quality::parse).unwrap_or(if kind == "audio" {
+                Quality::Audio
+            } else {
+                Quality::Max
+            });
+            let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: cb.from.id, lang };
+            enqueue_all(app, &ctx, vec![url], quality, None, None).await;
+        }
         "st" => {
             if !app.is_admin(cb.from.id) {
                 app.bot.answer_callback(&cb.id, Some(t.not_authorized), true).await;
@@ -2224,6 +2326,38 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
             }
         }
         // Answer to "which quality?".
+        "pl" => {
+            let Some((token, count)) = rest.split_once(':') else {
+                app.bot.answer_callback(&cb.id, None, false).await;
+                return;
+            };
+            let Some(count) = count.parse::<usize>().ok().filter(|n| *n > 0 && *n <= MAX_LINKS_PER_MESSAGE) else {
+                app.bot.answer_callback(&cb.id, None, false).await;
+                return;
+            };
+            if app.user_room(cb.from.id) < count {
+                let text = Refusal::UserQueueFull.text(t, app.cfg.user_queue, app.cfg.user_queue);
+                app.bot.answer_callback(&cb.id, Some(&text), true).await;
+                return;
+            }
+            let (mut urls, user_msg_id) = match app.take_urls(token, cb.from.id) {
+                Ok(res) => res,
+                Err(owned) => {
+                    let text = if owned { t.not_yours } else { t.picker_expired };
+                    app.bot.answer_callback(&cb.id, Some(text), true).await;
+                    return;
+                }
+            };
+            app.bot.answer_callback(&cb.id, None, false).await;
+            urls.truncate(count);
+            let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: cb.from.id, lang };
+            if let Some(quality) = app.store.default_quality(ctx.user) {
+                enqueue_all(app, &ctx, urls, quality, Some(msg.message_id), user_msg_id).await;
+            } else {
+                let _ = app.bot.delete_message(ctx.chat, msg.message_id).await;
+                ask_quality(app, &ctx, urls, user_msg_id).await;
+            }
+        }
         "q" => {
             let (token, code) = rest.split_once(':').unwrap_or((rest, ""));
             let Some(quality) = Quality::parse(code) else {
@@ -2463,11 +2597,14 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                     let (text, kb) = subscriptions_menu(app, cb.from.id, lang);
                     let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await;
                 }
-                ["dl", kind, video_id] => {
+                ["dl", kind @ ("v" | "a"), video_id] if cachekey::is_youtube_id(video_id) => {
                     let quality = if *kind == "a" {
                         Quality::Audio
                     } else {
-                        app.store.default_quality(cb.from.id).unwrap_or(Quality::Max)
+                        app.store
+                            .default_quality(cb.from.id)
+                            .filter(|q| q.kind() == Kind::Video)
+                            .unwrap_or(Quality::Max)
                     };
                     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
                     let alert = match (lang, *kind) {
@@ -3238,10 +3375,10 @@ mod tests {
         assert!(!long_kb.contains("q:t:1440"));
         assert!(!long_kb.contains("q:t:1080"));
         assert!(long_kb.contains("q:t:720"));
-        assert_eq!(command_list(Lang::Ru.t()).len(), 14);
+        assert_eq!(command_list(Lang::Ru.t()).len(), 15);
         assert!(command_list(Lang::Ru.t()).iter().any(|(cmd, _)| *cmd == "promo"));
         assert!(command_list(Lang::Ru.t()).iter().any(|(cmd, _)| *cmd == "search"));
-        let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080)).unwrap();
+        let lq = crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Height(1080), 1440).unwrap();
         let lq_str = lq.to_string();
         assert!(
             lq_str.contains("q:tok:720")
@@ -3249,7 +3386,7 @@ mod tests {
                 && lq_str.contains("q:tok:360")
                 && lq_str.contains("q:tok:audio")
         );
-        assert!(crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Audio).is_none());
+        assert!(crate::app::lower_quality_keyboard(Lang::En.t(), "tok", Quality::Audio, 1440).is_none());
     }
 
     #[tokio::test]

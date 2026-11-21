@@ -178,6 +178,7 @@ pub enum StatEvent {
         is_cached: bool,
         status: String,
         error_reason: Option<String>,
+        quality: Option<String>,
     },
 }
 
@@ -210,12 +211,13 @@ fn sync_write_download(
     is_cached: bool,
     status: &str,
     error_reason: Option<&str>,
+    quality: Option<&str>,
 ) {
     let now = now_secs();
     let extractor = detect_platform(url);
     let _ = conn.execute(
-        "INSERT INTO downloads (user_id, created_at, url, extractor, media_kind, file_size, duration, is_cached, status, error_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);",
+        "INSERT INTO downloads (user_id, created_at, url, extractor, media_kind, file_size, duration, is_cached, status, error_reason, quality)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);",
         params![
             user_id,
             now,
@@ -227,6 +229,7 @@ fn sync_write_download(
             if is_cached { 1 } else { 0 },
             status,
             error_reason,
+            quality,
         ],
     );
 }
@@ -242,7 +245,8 @@ impl StatsDb {
                         let sql = format!(
                             "ATTACH DATABASE '{}' AS old_stats;
                              INSERT OR IGNORE INTO users SELECT * FROM old_stats.users;
-                             INSERT OR IGNORE INTO downloads SELECT * FROM old_stats.downloads;
+                             INSERT OR IGNORE INTO downloads (id, user_id, created_at, url, extractor, media_kind, file_size, duration, is_cached, status, error_reason)
+                                 SELECT id, user_id, created_at, url, extractor, media_kind, file_size, duration, is_cached, status, error_reason FROM old_stats.downloads;
                              DETACH DATABASE old_stats;",
                             old_stats.to_string_lossy().replace('\'', "''")
                         );
@@ -303,8 +307,9 @@ impl StatsDb {
              CREATE INDEX IF NOT EXISTS idx_dl_status_extractor ON downloads(status, extractor);",
         )?;
 
-        // Upgrade schema if error_reason column wasn't there
+        // Upgrade older statistics databases.
         let _ = conn.execute_batch("ALTER TABLE downloads ADD COLUMN error_reason TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE downloads ADD COLUMN quality TEXT;");
 
         let conn_arc = Arc::new(Mutex::new(conn));
         let (tx, mut rx) = unbounded_channel::<StatEvent>();
@@ -336,6 +341,7 @@ impl StatsDb {
                                     is_cached,
                                     status,
                                     error_reason,
+                                    quality,
                                 } => {
                                     sync_write_download(
                                         &conn,
@@ -347,6 +353,7 @@ impl StatsDb {
                                         is_cached,
                                         &status,
                                         error_reason.as_deref(),
+                                        quality.as_deref(),
                                     );
                                 }
                             }
@@ -380,6 +387,7 @@ impl StatsDb {
         is_cached: bool,
         status: &str,
         error_reason: Option<&str>,
+        quality: Option<&str>,
     ) {
         let ev = StatEvent::Download {
             user_id,
@@ -390,6 +398,7 @@ impl StatsDb {
             is_cached,
             status: status.to_string(),
             error_reason: error_reason.map(String::from),
+            quality: quality.map(String::from),
         };
         if self.tx.send(ev).is_err() {
             if let Ok(conn) = self.conn.lock() {
@@ -403,9 +412,36 @@ impl StatsDb {
                     is_cached,
                     status,
                     error_reason,
+                    quality,
                 );
             }
         }
+    }
+
+    pub fn recent_downloads(&self, user_id: i64) -> Vec<(i64, String, String)> {
+        let Ok(conn) = self.conn.lock() else { return Vec::new() };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id, url, media_kind FROM downloads
+             WHERE user_id = ?1 AND status = 'success' ORDER BY id DESC LIMIT 8",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    pub fn download_for_user(&self, user_id: i64, id: i64) -> Option<(String, String, Option<String>)> {
+        self.conn
+            .lock()
+            .ok()?
+            .query_row(
+                "SELECT url, media_kind, quality FROM downloads WHERE id = ?1 AND user_id = ?2 AND status = 'success'",
+                params![id, user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok()
     }
 
     pub fn summary(&self) -> SummaryStats {
@@ -1136,10 +1172,45 @@ mod tests {
         db.record_user(101, Some("alice"), Some("Alice"));
         db.record_user(102, None, Some("Bob"));
 
-        db.record_download(101, "https://youtube.com/watch?v=1", "video", 50_000_000, 120, false, "success", None);
-        db.record_download(101, "https://tiktok.com/@test/video/1", "video", 10_000_000, 30, false, "success", None);
-        db.record_download(102, "https://instagram.com/reel/1", "video", 20_000_000, 15, true, "success", None);
-        db.record_download(102, "https://youtube.com/watch?v=2", "video", 0, 0, false, "error", Some("Too large"));
+        db.record_download(
+            101,
+            "https://youtube.com/watch?v=1",
+            "video",
+            50_000_000,
+            120,
+            false,
+            "success",
+            None,
+            Some("720"),
+        );
+        db.record_download(
+            101,
+            "https://tiktok.com/@test/video/1",
+            "video",
+            10_000_000,
+            30,
+            false,
+            "success",
+            None,
+            None,
+        );
+        db.record_download(102, "https://instagram.com/reel/1", "video", 20_000_000, 15, true, "success", None, None);
+        db.record_download(
+            102,
+            "https://youtube.com/watch?v=2",
+            "video",
+            0,
+            0,
+            false,
+            "error",
+            Some("Too large"),
+            None,
+        );
+
+        let history = db.recent_downloads(101);
+        assert_eq!(history.len(), 2);
+        assert_eq!(db.download_for_user(101, history[1].0).unwrap().2.as_deref(), Some("720"));
+        assert!(db.download_for_user(102, history[1].0).is_none());
 
         let s = db.summary();
         assert_eq!(s.total_users, 2);

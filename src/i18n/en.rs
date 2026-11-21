@@ -107,6 +107,7 @@ YouTube, TikTok, Instagram, X/Twitter, Reddit, Vimeo, Twitch, SoundCloud and 100
     c_help: "Help and supported sites",
     c_search: "Search videos (Premium)",
     c_quality: "Default quality",
+    c_history: "Download history",
     c_status: "Your queue",
     c_mystats: "My statistics",
     c_cancel: "Cancel a download (or all)",

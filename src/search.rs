@@ -87,6 +87,18 @@ pub async fn search_youtube(
         return Ok(cached.into_iter().take(limit).collect());
     }
 
+    let items = list_youtube(cfg, slots, clean_query, limit, false).await?;
+    put_cached(clean_query, items.clone());
+    Ok(items)
+}
+
+pub async fn list_youtube(
+    cfg: &Config,
+    slots: &Semaphore,
+    input: &str,
+    limit: usize,
+    playlist: bool,
+) -> Result<Vec<SearchItem>, String> {
     let _permit = slots.acquire().await.map_err(|e| e.to_string())?;
 
     let mut args: Vec<String> = vec![
@@ -100,9 +112,12 @@ pub async fn search_youtube(
         "15".to_string(),
         "--retries".to_string(),
         "2".to_string(),
-        "--default-search".to_string(),
-        format!("ytsearch{limit}"),
     ];
+    if playlist {
+        args.extend(["--yes-playlist".to_string(), "--playlist-end".to_string(), limit.to_string()]);
+    } else {
+        args.extend(["--default-search".to_string(), format!("ytsearch{limit}")]);
+    }
 
     if let Some(proxy) = &cfg.proxy_url {
         args.extend(["--proxy".to_string(), proxy.clone()]);
@@ -113,7 +128,7 @@ pub async fn search_youtube(
         args.extend(["--cookies-from-browser".to_string(), browser.clone()]);
     }
 
-    args.push(clean_query.to_string());
+    args.extend(["--".to_string(), input.to_string()]);
 
     let mut cmd = proc::command(&cfg.ytdlp_bin, cfg.child_nice);
     cmd.args(&args);
@@ -126,8 +141,9 @@ pub async fn search_youtube(
             return ControlFlow::Continue(());
         }
         if let Ok(raw) = serde_json::from_str::<RawEntry>(line) {
-            if let Some(id) = raw.id {
-                let url = raw.url.unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}"));
+            if let Some(id) = raw.id.filter(|id| !playlist || crate::cachekey::is_youtube_id(id)) {
+                let canonical_url = || format!("https://www.youtube.com/watch?v={id}");
+                let url = if playlist { canonical_url() } else { raw.url.unwrap_or_else(canonical_url) };
                 let title = raw.title.unwrap_or_else(|| "Untitled".to_string());
                 let uploader = raw.uploader.or(raw.channel).unwrap_or_else(|| "YouTube".to_string());
                 let duration_secs = raw.duration.unwrap_or(0.0) as u64;
@@ -152,10 +168,9 @@ pub async fn search_youtube(
 
     match res {
         Ok(out) => {
-            if !out.ok && items.is_empty() {
+            if !out.ok && (playlist || items.is_empty()) {
                 return Err(out.stderr);
             }
-            put_cached(clean_query, items.clone());
             Ok(items.into_iter().take(limit).collect())
         }
         Err(proc::RunError::Timeout) => Err("Search timed out".to_string()),

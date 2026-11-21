@@ -14,6 +14,22 @@
 use crate::types::{Kind, Quality};
 use crate::util::{host_of, normalize_url};
 
+pub fn youtube_playlist_url(link: &str) -> Option<String> {
+    let url = reqwest::Url::parse(link).ok()?;
+    match url.host_str()? {
+        "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" => {}
+        _ => return None,
+    }
+    if url.path() != "/playlist" {
+        return None;
+    }
+    let (_, id) = url.query_pairs().find(|(key, _)| key == "list")?;
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
+        return None;
+    }
+    Some(format!("https://www.youtube.com/playlist?list={id}"))
+}
+
 /// `<site>:<id>` for links whose video id is visible in the URL. The site
 /// names match yt-dlp's extractor keys (lowercased), so these keys line up
 /// with the ones derived from metadata.
@@ -93,7 +109,7 @@ fn is_vk_id(s: &str) -> bool {
     is_digits(owner) && is_digits(item)
 }
 
-fn is_youtube_id(s: &str) -> bool {
+pub(crate) fn is_youtube_id(s: &str) -> bool {
     s.len() == 11 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
@@ -140,6 +156,17 @@ pub fn delivered_key(video: &str, kind: Kind, height: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_explicit_youtube_playlists() {
+        assert_eq!(
+            youtube_playlist_url("https://music.youtube.com/playlist?list=PL_example-123&si=share").as_deref(),
+            Some("https://www.youtube.com/playlist?list=PL_example-123")
+        );
+        assert!(youtube_playlist_url("https://youtube.com/watch?v=dQw4w9WgXcQ&list=PL_example").is_none());
+        assert!(youtube_playlist_url("https://youtube.com.example.org/playlist?list=PL_example").is_none());
+        assert!(youtube_playlist_url("https://youtube.com/playlist?list=abc%26v%3Ddef").is_none());
+    }
 
     #[test]
     fn youtube_variants_are_one_video() {

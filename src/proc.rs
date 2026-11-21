@@ -161,6 +161,13 @@ pub async fn capture(mut cmd: Command, timeout: Duration) -> Result<(Output, Str
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn wait_for_timeout_fixture() {
+        println!("ready");
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
     fn shell(script: &str) -> Command {
         let mut cmd = if cfg!(windows) {
             let mut c = command("cmd", 0);
@@ -195,12 +202,25 @@ mod tests {
     #[test]
     fn stops_and_times_out() {
         rt().block_on(async {
-            let sleep = if cfg!(windows) { "echo x&& ping -n 30 127.0.0.1 >NUL" } else { "echo x; sleep 30" };
+            let fixture = || {
+                let exe = std::env::current_exe().unwrap();
+                let mut cmd = command(exe.to_str().unwrap(), 0);
+                cmd.args(["--exact", "proc::tests::wait_for_timeout_fixture", "--ignored", "--nocapture"])
+                    .stdout(Stdio::piped());
+                cmd
+            };
             let started = std::time::Instant::now();
-            let res = run(shell(sleep), Duration::from_secs(20), |_| ControlFlow::Break(())).await;
+            let res = run(fixture(), Duration::from_secs(10), |line| {
+                if line == "ready" {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .await;
             assert!(matches!(res, Err(RunError::Stopped)));
 
-            let res = run(shell(sleep), Duration::from_millis(300), |_| ControlFlow::Continue(())).await;
+            let res = run(fixture(), Duration::from_millis(300), |_| ControlFlow::Continue(())).await;
             assert!(matches!(res, Err(RunError::Timeout)));
             assert!(started.elapsed() < Duration::from_secs(15));
 
