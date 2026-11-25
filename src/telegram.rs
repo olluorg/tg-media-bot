@@ -399,6 +399,20 @@ impl Bot {
         }
     }
 
+    /// Edit only a message's inline keyboard markup.
+    pub async fn edit_reply_markup(&self, chat_id: i64, message_id: i64, markup: Value) -> Result<(), TgError> {
+        let body = json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": markup,
+        });
+        match self.call::<IgnoredAny>("editMessageReplyMarkup", &body, SHORT_TIMEOUT).await {
+            Ok(_) => Ok(()),
+            Err(TgError::Api { desc, .. }) if desc.contains("message is not modified") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Edit a media message's caption; passing no markup removes any inline keyboard.
     pub async fn edit_message_caption(
         &self,

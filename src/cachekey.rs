@@ -11,7 +11,7 @@
 //!     for 1080p of a 720p-only video, or "max" that had to fall back to 720p
 //!     to fit the size limit, reuses the 720p upload.
 
-use crate::types::{Kind, Quality};
+use crate::types::{AudioLang, Kind, Quality};
 use crate::util::{host_of, normalize_url};
 
 pub fn youtube_playlist_url(link: &str) -> Option<String> {
@@ -144,12 +144,30 @@ pub fn request_key(video: &str, q: Quality) -> String {
     }
 }
 
+/// "What was asked for" with an optional preferred audio track language.
+pub fn request_key_with_lang(video: &str, q: Quality, audio_lang: Option<AudioLang>) -> String {
+    let base = request_key(video, q);
+    match audio_lang {
+        Some(lang) => format!("{base}|al={}", lang.code()),
+        None => base,
+    }
+}
+
 /// "What was actually sent."
 pub fn delivered_key(video: &str, kind: Kind, height: Option<u32>) -> String {
     match (kind, height) {
         (Kind::Audio, _) => format!("{video}|a"),
         (Kind::Video, Some(h)) => format!("{video}|v={h}"),
         (Kind::Video, None) => format!("{video}|v=?"),
+    }
+}
+
+/// "What was actually sent" with an optional preferred audio track language.
+pub fn delivered_key_with_lang(video: &str, kind: Kind, height: Option<u32>, audio_lang: Option<AudioLang>) -> String {
+    let base = delivered_key(video, kind, height);
+    match audio_lang {
+        Some(lang) => format!("{base}|al={}", lang.code()),
+        None => base,
     }
 }
 

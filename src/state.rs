@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cachekey;
 use crate::i18n::Lang;
-use crate::types::Quality;
+use crate::types::{AudioLang, Quality};
 
 /// Upper bound on cache keys; the oldest tenth is dropped when exceeded.
 pub const MAX_CACHE: usize = 20_000;
@@ -50,6 +50,8 @@ pub struct SavedJob {
     pub url: String,
     pub quality: String,
     pub lang: Lang,
+    #[serde(default)]
+    pub audio_lang: Option<AudioLang>,
     pub status_msg: Option<i64>,
     pub user_msg_id: Option<i64>,
     pub created_at: u64,
@@ -93,6 +95,7 @@ pub struct Store {
     conn: Mutex<Connection>,
     chats: Mutex<HashMap<i64, ChatCfg>>,
     quality: Mutex<HashMap<i64, String>>,
+    audio_lang: Mutex<HashMap<i64, String>>,
 }
 
 pub fn now_secs() -> u64 {
@@ -128,6 +131,11 @@ fn init_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
              quality TEXT NOT NULL
          );
 
+         CREATE TABLE IF NOT EXISTS user_audio_lang (
+             user_id INTEGER PRIMARY KEY,
+             lang TEXT NOT NULL
+         );
+
          CREATE TABLE IF NOT EXISTS media_cache (
              key TEXT PRIMARY KEY,
              kind TEXT NOT NULL,
@@ -157,6 +165,7 @@ fn init_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
              url TEXT NOT NULL,
              quality TEXT NOT NULL,
              lang TEXT NOT NULL,
+             audio_lang TEXT,
              status_msg INTEGER,
              user_msg_id INTEGER,
              created_at INTEGER NOT NULL
@@ -223,6 +232,7 @@ fn init_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     let _ = conn.execute("ALTER TABLE user_premium ADD COLUMN activated_at INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE user_premium ADD COLUMN warned_at INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE user_premium ADD COLUMN expired_notified_at INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE saved_jobs ADD COLUMN audio_lang TEXT", []);
 
     let _ = conn.execute(
         "INSERT OR IGNORE INTO promocodes (code, duration_days, max_uses, used_count, created_at)
@@ -270,7 +280,22 @@ impl Store {
             }
         }
 
-        Store { db_path, conn: Mutex::new(conn), chats: Mutex::new(chats), quality: Mutex::new(quality) }
+        let mut audio_lang = HashMap::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT user_id, lang FROM user_audio_lang") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+                for item in rows.flatten() {
+                    audio_lang.insert(item.0, item.1);
+                }
+            }
+        }
+
+        Store {
+            db_path,
+            conn: Mutex::new(conn),
+            chats: Mutex::new(chats),
+            quality: Mutex::new(quality),
+            audio_lang: Mutex::new(audio_lang),
+        }
     }
 
     #[cfg(test)]
@@ -284,6 +309,7 @@ impl Store {
             conn: Mutex::new(conn),
             chats: Mutex::new(HashMap::new()),
             quality: Mutex::new(HashMap::new()),
+            audio_lang: Mutex::new(HashMap::new()),
         }
     }
 
@@ -478,6 +504,37 @@ impl Store {
                     }
                     None => {
                         let _ = conn.execute("DELETE FROM user_quality WHERE user_id = ?1", params![user_id]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Preferred audio track language; `None` means automatic / original.
+    pub fn audio_lang(&self, user_id: i64) -> Option<AudioLang> {
+        let al = self.audio_lang.lock().unwrap_or_else(|e| e.into_inner());
+        al.get(&user_id).and_then(|c| AudioLang::parse(c))
+    }
+
+    pub fn set_audio_lang(&self, user_id: i64, lang: Option<AudioLang>) {
+        let mut al = self.audio_lang.lock().unwrap_or_else(|e| e.into_inner());
+        let code = lang.map(|l| l.code().to_string());
+        let changed = match &code {
+            Some(c) => al.insert(user_id, c.clone()).as_ref() != Some(c),
+            None => al.remove(&user_id).is_some(),
+        };
+        if changed {
+            if let Ok(conn) = self.conn.lock() {
+                match code {
+                    Some(c) => {
+                        let _ = conn.execute(
+                            "INSERT INTO user_audio_lang (user_id, lang) VALUES (?1, ?2)
+                             ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang",
+                            params![user_id, c],
+                        );
+                    }
+                    None => {
+                        let _ = conn.execute("DELETE FROM user_audio_lang WHERE user_id = ?1", params![user_id]);
                     }
                 }
             }
@@ -711,8 +768,8 @@ impl Store {
     pub fn save_active_job(&self, job: SavedJob) {
         let Ok(conn) = self.conn.lock() else { return };
         let _ = conn.execute(
-            "INSERT INTO saved_jobs (id, user_id, chat_id, thread_id, url, quality, lang, status_msg, user_msg_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO saved_jobs (id, user_id, chat_id, thread_id, url, quality, lang, audio_lang, status_msg, user_msg_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                  status_msg = excluded.status_msg",
             params![
@@ -723,6 +780,7 @@ impl Store {
                 job.url,
                 job.quality,
                 job.lang.code(),
+                job.audio_lang.map(|l| l.code()),
                 job.status_msg,
                 job.user_msg_id,
                 job.created_at as i64,
@@ -744,12 +802,14 @@ impl Store {
         let Ok(conn) = self.conn.lock() else { return Vec::new() };
         let mut list = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, user_id, chat_id, thread_id, url, quality, lang, status_msg, user_msg_id, created_at FROM saved_jobs",
+            "SELECT id, user_id, chat_id, thread_id, url, quality, lang, audio_lang, status_msg, user_msg_id, created_at FROM saved_jobs",
         ) {
             if let Ok(rows) = stmt.query_map([], |r| {
                 let lang_str: String = r.get(6)?;
                 let lang = Lang::from_code(&lang_str).unwrap_or(Lang::En);
-                let cr: i64 = r.get(9)?;
+                let audio_lang_str: Option<String> = r.get(7)?;
+                let audio_lang = audio_lang_str.as_deref().and_then(AudioLang::parse);
+                let cr: i64 = r.get(10)?;
                 Ok(SavedJob {
                     id: r.get(0)?,
                     user_id: r.get(1)?,
@@ -758,8 +818,9 @@ impl Store {
                     url: r.get(4)?,
                     quality: r.get(5)?,
                     lang,
-                    status_msg: r.get(7)?,
-                    user_msg_id: r.get(8)?,
+                    audio_lang,
+                    status_msg: r.get(8)?,
+                    user_msg_id: r.get(9)?,
                     created_at: cr.max(0) as u64,
                 })
             }) {
@@ -1458,6 +1519,7 @@ mod tests {
             url: "https://example.com/video".into(),
             quality: "720".into(),
             lang: Lang::En,
+            audio_lang: Some(AudioLang::Ru),
             status_msg: Some(300),
             user_msg_id: Some(400),
             created_at: 1000,

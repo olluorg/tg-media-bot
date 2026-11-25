@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tokio::sync::{watch, Semaphore};
 use tokio::task::AbortHandle;
 
-use crate::cachekey::{self, delivered_key, request_key};
+use crate::cachekey::{self, delivered_key_with_lang, request_key_with_lang};
 use crate::config::Config;
 use crate::i18n::{fill, Lang, Strings};
 use crate::media::{self, Ready};
@@ -24,7 +24,7 @@ use crate::plugins::Plugins;
 use crate::state::{CacheEntry, SavedJob, Store};
 use crate::sys;
 use crate::telegram::{Bot, Media, MediaKind, Message, Source, TgError, User};
-use crate::types::{Kind, Quality, Stage};
+use crate::types::{AudioLang, Kind, Quality, Stage};
 use crate::util::{self, html_escape};
 use crate::ytdlp::{self, DlError, Hint, Outcome, Probed, Reject};
 
@@ -44,6 +44,7 @@ pub struct Job {
     pub url: String,
     pub quality: Quality,
     pub lang: Lang,
+    pub audio_lang: Option<AudioLang>,
     pub minimal: bool,
     /// Message id of the user's request, to delete once the artifact is delivered.
     pub user_msg_id: Option<i64>,
@@ -98,6 +99,7 @@ pub struct Request {
     pub url: String,
     pub quality: Quality,
     pub lang: Lang,
+    pub audio_lang: Option<AudioLang>,
     /// Message to turn into this job's status (the quality question).
     pub status_msg: Option<i64>,
     /// Message id of the user's request.
@@ -137,7 +139,18 @@ struct Pending {
     user_id: i64,
     urls: Vec<String>,
     user_msg_id: Option<i64>,
+    audio_lang: Option<AudioLang>,
+    duration_secs: Option<u64>,
+    youtube_id: Option<String>,
+    max_bytes: u64,
     created: Instant,
+}
+
+#[derive(Default)]
+pub struct PendingUrls {
+    pub urls: Vec<String>,
+    pub user_msg_id: Option<i64>,
+    pub audio_lang: Option<AudioLang>,
 }
 
 pub struct App {
@@ -441,10 +454,10 @@ fn cache_entry(msg: &Message, ready: &Ready) -> Option<CacheEntry> {
 fn probe_keys(job: &Job, p: &Probed) -> Vec<String> {
     let mut keys = Vec::with_capacity(4);
     if let Some(v) = &p.video_key {
-        keys.push(request_key(v, job.quality));
-        keys.push(delivered_key(v, p.kind, p.height));
+        keys.push(request_key_with_lang(v, job.quality, job.audio_lang));
+        keys.push(delivered_key_with_lang(v, p.kind, p.height, job.audio_lang));
     }
-    keys.push(delivered_key(&job.video_key, p.kind, p.height));
+    keys.push(delivered_key_with_lang(&job.video_key, p.kind, p.height, job.audio_lang));
     keys.dedup();
     keys
 }
@@ -540,6 +553,20 @@ impl App {
     // -- quality question ---------------------------------------------------
 
     pub fn stash_urls(&self, user_id: i64, urls: Vec<String>, user_msg_id: Option<i64>) -> String {
+        self.stash_pending(user_id, urls, user_msg_id, None, None, None, u64::MAX)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn stash_pending(
+        &self,
+        user_id: i64,
+        urls: Vec<String>,
+        user_msg_id: Option<i64>,
+        audio_lang: Option<AudioLang>,
+        duration_secs: Option<u64>,
+        youtube_id: Option<String>,
+        max_bytes: u64,
+    ) -> String {
         let mut pending = lock(&self.pending);
         pending.retain(|_, p| p.created.elapsed() < PENDING_TTL);
         if pending.len() >= PENDING_MAX {
@@ -548,13 +575,50 @@ impl App {
             }
         }
         let token = self.new_id(self.next_seq());
-        pending.insert(token.clone(), Pending { user_id, urls, user_msg_id, created: Instant::now() });
+        pending.insert(
+            token.clone(),
+            Pending {
+                user_id,
+                urls,
+                user_msg_id,
+                audio_lang,
+                duration_secs,
+                youtube_id,
+                max_bytes,
+                created: Instant::now(),
+            },
+        );
         token
+    }
+
+    pub fn set_pending_audio_lang(
+        &self,
+        token: &str,
+        user_id: i64,
+        audio_lang: Option<AudioLang>,
+    ) -> Result<(Option<u64>, Option<String>, u64), bool> {
+        let mut pending = lock(&self.pending);
+        match pending.get_mut(token) {
+            None => Err(false),
+            Some(p) if p.created.elapsed() >= PENDING_TTL => {
+                pending.remove(token);
+                Err(false)
+            }
+            Some(p) if p.user_id != user_id => Err(true),
+            Some(p) => {
+                p.audio_lang = audio_lang;
+                Ok((p.duration_secs, p.youtube_id.clone(), p.max_bytes))
+            }
+        }
     }
 
     /// Take the links behind a quality question. `Err(true)` means the
     /// question belongs to someone else, `Err(false)` that it expired.
     pub fn take_urls(&self, token: &str, user_id: i64) -> Result<(Vec<String>, Option<i64>), bool> {
+        self.take_urls_with_lang(token, user_id).map(|p| (p.urls, p.user_msg_id))
+    }
+
+    pub fn take_urls_with_lang(&self, token: &str, user_id: i64) -> Result<PendingUrls, bool> {
         let mut pending = lock(&self.pending);
         match pending.get(token) {
             None => Err(false),
@@ -564,7 +628,10 @@ impl App {
             }
             // Only the person who sent the links answers for them.
             Some(p) if p.user_id != user_id => Err(true),
-            Some(_) => Ok(pending.remove(token).map(|p| (p.urls, p.user_msg_id)).unwrap_or_default()),
+            Some(_) => Ok(pending
+                .remove(token)
+                .map(|p| PendingUrls { urls: p.urls, user_msg_id: p.user_msg_id, audio_lang: p.audio_lang })
+                .unwrap_or_default()),
         }
     }
 
@@ -585,7 +652,7 @@ impl App {
             return Err(Refusal::PrivateUrl);
         }
         let video_key = cachekey::video_key(&req.url);
-        let key = request_key(&video_key, req.quality);
+        let key = request_key_with_lang(&video_key, req.quality, req.audio_lang);
         let minimal = self.store.minimal(req.chat_id);
 
         let mut jobs = lock(&self.jobs);
@@ -619,6 +686,7 @@ impl App {
             url: req.url.clone(),
             quality: req.quality,
             lang: req.lang,
+            audio_lang: req.audio_lang,
             minimal,
             user_msg_id: req.user_msg_id,
             video_key: video_key.clone(),
@@ -648,6 +716,7 @@ impl App {
             url: req.url.clone(),
             quality: req.quality.code(),
             lang: req.lang,
+            audio_lang: req.audio_lang,
             status_msg,
             user_msg_id: req.user_msg_id,
             created_at: crate::state::now_secs(),
@@ -760,6 +829,7 @@ impl App {
                 url: saved.url,
                 quality,
                 lang: saved.lang,
+                audio_lang: saved.audio_lang,
                 status_msg: saved.status_msg,
                 user_msg_id: saved.user_msg_id,
             };
@@ -1192,10 +1262,20 @@ impl App {
                 job.set_title(t);
                 self.store.title_put(&job.video_key, t);
             };
-            let outcome =
-                ytdlp::fetch(&self.cfg, &self.plugins, &job.url, kind, cap, dir, &job.stage, lookup, &on_title)
-                    .await
-                    .map_err(JobError::Dl)?;
+            let outcome = ytdlp::fetch(
+                &self.cfg,
+                &self.plugins,
+                &job.url,
+                kind,
+                cap,
+                job.audio_lang,
+                dir,
+                &job.stage,
+                lookup,
+                &on_title,
+            )
+            .await
+            .map_err(JobError::Dl)?;
             match outcome {
                 Outcome::Cached(entry, probed) => {
                     job.set_title(&entry.title);
@@ -1278,9 +1358,9 @@ async fn run_job(app: Arc<App>, job: Arc<Job>) {
     // 1. Same video (any spelling of the link) already sent: no queue at all.
     let mut initial_keys = vec![job.key.clone()];
     if let Quality::Height(h) = job.quality {
-        initial_keys.push(cachekey::delivered_key(&job.video_key, Kind::Video, Some(h)));
+        initial_keys.push(delivered_key_with_lang(&job.video_key, Kind::Video, Some(h), job.audio_lang));
     } else if job.quality == Quality::Audio {
-        initial_keys.push(cachekey::delivered_key(&job.video_key, Kind::Audio, None));
+        initial_keys.push(delivered_key_with_lang(&job.video_key, Kind::Audio, None, job.audio_lang));
     }
     if let Some(entry) = app.store.cache_find(&initial_keys) {
         job.set_title(&entry.title);
@@ -1502,9 +1582,10 @@ mod tests {
             url: url.into(),
             quality,
             lang: Lang::En,
+            audio_lang: None,
             minimal: false,
             user_msg_id: None,
-            key: request_key(&video_key, quality),
+            key: request_key_with_lang(&video_key, quality, None),
             video_key,
             stage: watch::channel(Stage::Queued).0,
             sent: Arc::new(AtomicU64::new(0)),

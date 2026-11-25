@@ -12,6 +12,40 @@ pub enum Kind {
     Audio,
 }
 
+/// Preferred audio track language.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioLang {
+    Ru,
+    En,
+}
+
+impl AudioLang {
+    pub const ALL: [AudioLang; 2] = [AudioLang::Ru, AudioLang::En];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            AudioLang::Ru => "ru",
+            AudioLang::En => "en",
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "ru" => Some(AudioLang::Ru),
+            "en" => Some(AudioLang::En),
+            _ => None,
+        }
+    }
+
+    pub fn button(self) -> &'static str {
+        match self {
+            AudioLang::Ru => "🇷🇺 RU",
+            AudioLang::En => "🇺🇸 EN",
+        }
+    }
+}
+
 /// A quality choice: what the picker buttons and `/quality` offer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quality {

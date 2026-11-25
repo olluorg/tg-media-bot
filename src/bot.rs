@@ -10,7 +10,7 @@ use crate::i18n::{fill, Lang, Strings, LANG_PROMPT};
 use crate::state;
 use crate::sys;
 use crate::telegram::{CallbackQuery, InlineQuery, Media, MediaKind, Message, Source, Update, User};
-use crate::types::{Kind, Quality, Stage};
+use crate::types::{AudioLang, Kind, Quality, Stage};
 use crate::util;
 
 /// Links taken from one message.
@@ -94,18 +94,33 @@ fn parse_menu_action(text: &str) -> Option<MenuAction> {
     }
 }
 
+fn audio_lang_name(lang: Lang, audio_lang: Option<AudioLang>) -> &'static str {
+    match audio_lang {
+        Some(AudioLang::Ru) => "🇷🇺 RU",
+        Some(AudioLang::En) => "🇺🇸 EN",
+        None => match lang {
+            Lang::Ru => "Авто (оригинал)",
+            Lang::Uk => "Авто (оригінал)",
+            Lang::Es => "Auto (original)",
+            _ => "Auto (original)",
+        },
+    }
+}
+
 fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, Value) {
     let t = lang.t();
     let cur_q = quality_name(t, app.store.default_quality(user_id));
+    let cur_al = audio_lang_name(lang, app.store.audio_lang(user_id));
     let minimal = app.store.minimal(chat_id);
     let stats = app.stats.get_user_stats(user_id);
     let size_fmt = crate::util::fmt_size(stats.total_bytes);
 
-    let (text, min_label, btn_q, btn_lang, btn_stats, btn_clear) = match lang {
+    let (text, min_label, btn_q, btn_lang, btn_alang, btn_stats, btn_clear) = match lang {
         Lang::Ru => (
             format!(
                 "⚙️ <b>Настройки бота</b>\n\n\
                  • 🎚 Качество по умолчанию: <b>{cur_q}</b>\n\
+                 • 🎧 Аудиодорожка: <b>{cur_al}</b>\n\
                  • 🌐 Язык интерфейса: <b>{}</b>\n\
                  • 🤫 Минимальный режим: <b>{}</b>\n\
                  • 📊 Скачано вами: <b>{} видео</b> ({size_fmt})",
@@ -120,6 +135,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
             },
             "🎚 Качество",
             "🌐 Язык",
+            "🎧 Аудио",
             "📊 Моя статистика",
             "🧹 Очистить чат",
         ),
@@ -127,6 +143,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
             format!(
                 "⚙️ <b>Налаштування бота</b>\n\n\
                  • 🎚 Якість за замовчуванням: <b>{cur_q}</b>\n\
+                 • 🎧 Аудіодоріжка: <b>{cur_al}</b>\n\
                  • 🌐 Мова інтерфейсу: <b>{}</b>\n\
                  • 🤫 Мінімальний режим: <b>{}</b>\n\
                  • 📊 Завантажено вами: <b>{} відео</b> ({size_fmt})",
@@ -141,6 +158,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
             },
             "🎚 Якість",
             "🌐 Мова",
+            "🎧 Аудіо",
             "📊 Моя статистика",
             "🧹 Очистити чат",
         ),
@@ -148,6 +166,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
             format!(
                 "⚙️ <b>Ajustes del bot</b>\n\n\
                  • 🎚 Calidad predeterminada: <b>{cur_q}</b>\n\
+                 • 🎧 Pista de audio: <b>{cur_al}</b>\n\
                  • 🌐 Idioma: <b>{}</b>\n\
                  • 🤫 Modo mínimo: <b>{}</b>\n\
                  • 📊 Descargas: <b>{} videos</b> ({size_fmt})",
@@ -158,6 +177,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
             if minimal { "🤫 Modo: Mínimo (on)" } else { "🤫 Modo: Normal (off)" },
             "🎚 Calidad",
             "🌐 Idioma",
+            "🎧 Audio",
             "📊 Mis estadísticas",
             "🧹 Limpiar chat",
         ),
@@ -165,6 +185,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
             format!(
                 "⚙️ <b>Bot Settings</b>\n\n\
                  • 🎚 Default quality: <b>{cur_q}</b>\n\
+                 • 🎧 Audio track: <b>{cur_al}</b>\n\
                  • 🌐 Interface language: <b>{}</b>\n\
                  • 🤫 Minimal mode: <b>{}</b>\n\
                  • 📊 Your downloads: <b>{} videos</b> ({size_fmt})",
@@ -175,6 +196,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
             if minimal { "🤫 Mode: Minimal (on)" } else { "🤫 Mode: Normal (off)" },
             "🎚 Quality",
             "🌐 Language",
+            "🎧 Audio",
             "📊 My Stats",
             "🧹 Clear Chat",
         ),
@@ -187,6 +209,7 @@ fn settings_menu(app: &App, user_id: i64, chat_id: i64, lang: Lang) -> (String, 
                 { "text": btn_lang, "callback_data": "cfg:lang" }
             ],
             [
+                { "text": btn_alang, "callback_data": "cfg:alang" },
                 { "text": min_label, "callback_data": "cfg:min" }
             ],
             [
@@ -230,6 +253,20 @@ fn quality_rows(
     rows
 }
 
+fn audio_lang_row(lang: Lang, token: &str, selected: Option<AudioLang>) -> Vec<Value> {
+    let auto_base = match lang {
+        Lang::Ru | Lang::Uk => "🎧 Авто",
+        _ => "🎧 Auto",
+    };
+    let auto_text = if selected.is_none() { format!("✓ {auto_base}") } else { auto_base.to_string() };
+    let mut row = vec![json!({ "text": auto_text, "callback_data": format!("pa:{token}:auto") })];
+    for al in AudioLang::ALL {
+        let text = if selected == Some(al) { format!("✓ {}", al.button()) } else { al.button().to_string() };
+        row.push(json!({ "text": text, "callback_data": format!("pa:{token}:{}", al.code()) }));
+    }
+    row
+}
+
 fn picker_keyboard(
     lang: Lang,
     token: &str,
@@ -237,8 +274,10 @@ fn picker_keyboard(
     duration_secs: Option<u64>,
     max_bytes: u64,
     youtube_id: Option<&str>,
+    audio_lang: Option<AudioLang>,
 ) -> Value {
     let mut rows = quality_rows(lang.t(), max_height, duration_secs, max_bytes, |code| format!("q:{token}:{code}"));
+    rows.push(audio_lang_row(lang, token, audio_lang));
     if let Some(id) = youtube_id {
         let mut actions = video_action_rows(lang, id, |kind| {
             let code = if kind == "a" { "audio" } else { "max" };
@@ -1304,9 +1343,18 @@ async fn ask_quality(app: &Arc<App>, ctx: &Ctx, urls: Vec<String>, user_msg_id: 
     };
 
     let limit_bytes = app.cfg.max_file_bytes.min(2000 * 1024 * 1024);
-    let token = app.stash_urls(ctx.user, urls, user_msg_id);
+    let audio_lang = app.store.audio_lang(ctx.user);
     let youtube_id = video_key.as_deref().and_then(|key| key.strip_prefix("youtube:"));
-    let kb = picker_keyboard(ctx.lang, &token, app.cfg.max_height, duration_secs, limit_bytes, youtube_id);
+    let token = app.stash_pending(
+        ctx.user,
+        urls,
+        user_msg_id,
+        audio_lang,
+        duration_secs,
+        youtube_id.map(str::to_string),
+        limit_bytes,
+    );
+    let kb = picker_keyboard(ctx.lang, &token, app.cfg.max_height, duration_secs, limit_bytes, youtube_id, audio_lang);
     app.say(ctx.chat, ctx.thread, &text, Some(kb)).await;
 }
 
@@ -1320,6 +1368,19 @@ async fn enqueue_all(
     quality: Quality,
     picker: Option<i64>,
     user_msg_id: Option<i64>,
+) {
+    let audio_lang = app.store.audio_lang(ctx.user);
+    enqueue_all_with_audio(app, ctx, urls, quality, picker, user_msg_id, audio_lang).await;
+}
+
+async fn enqueue_all_with_audio(
+    app: &Arc<App>,
+    ctx: &Ctx,
+    urls: Vec<String>,
+    quality: Quality,
+    picker: Option<i64>,
+    user_msg_id: Option<i64>,
+    audio_lang: Option<AudioLang>,
 ) {
     let t = ctx.lang.t();
     let single = urls.len() == 1;
@@ -1341,6 +1402,7 @@ async fn enqueue_all(
             url,
             quality,
             lang: ctx.lang,
+            audio_lang,
             status_msg: None,
             user_msg_id,
         };
@@ -2358,13 +2420,45 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                 ask_quality(app, &ctx, urls, user_msg_id).await;
             }
         }
+        "pa" => {
+            let (token, code) = rest.split_once(':').unwrap_or((rest, ""));
+            let choice = if code == "auto" { None } else { AudioLang::parse(code) };
+            if code != "auto" && choice.is_none() {
+                app.bot.answer_callback(&cb.id, None, false).await;
+                return;
+            }
+            let (duration_secs, youtube_id, max_bytes) = match app.set_pending_audio_lang(token, cb.from.id, choice) {
+                Ok(res) => res,
+                Err(true) => {
+                    app.bot.answer_callback(&cb.id, Some(t.not_yours), true).await;
+                    return;
+                }
+                Err(false) => {
+                    app.bot.answer_callback(&cb.id, Some(t.picker_expired), true).await;
+                    return;
+                }
+            };
+            app.bot.answer_callback(&cb.id, Some(audio_lang_name(lang, choice)), false).await;
+            let kb = picker_keyboard(
+                lang,
+                token,
+                app.cfg.max_height,
+                duration_secs,
+                max_bytes,
+                youtube_id.as_deref(),
+                choice,
+            );
+            if let Err(e) = app.bot.edit_reply_markup(msg.chat.id, msg.message_id, kb).await {
+                log::debug!("edit picker audio lang failed: {e}");
+            }
+        }
         "q" => {
             let (token, code) = rest.split_once(':').unwrap_or((rest, ""));
             let Some(quality) = Quality::parse(code) else {
                 app.bot.answer_callback(&cb.id, None, false).await;
                 return;
             };
-            let (urls, user_msg_id) = match app.take_urls(token, cb.from.id) {
+            let pending = match app.take_urls_with_lang(token, cb.from.id) {
                 Ok(res) => res,
                 Err(true) => {
                     app.bot.answer_callback(&cb.id, Some(t.not_yours), true).await;
@@ -2377,7 +2471,44 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
             };
             app.bot.answer_callback(&cb.id, None, false).await;
             let ctx = Ctx { chat: msg.chat.id, thread: msg.thread(), user: cb.from.id, lang };
-            enqueue_all(app, &ctx, urls, quality, Some(msg.message_id), user_msg_id).await;
+            enqueue_all_with_audio(
+                app,
+                &ctx,
+                pending.urls,
+                quality,
+                Some(msg.message_id),
+                pending.user_msg_id,
+                pending.audio_lang,
+            )
+            .await;
+        }
+        "al" => {
+            let choice = if rest == "auto" { None } else { AudioLang::parse(rest) };
+            if rest != "auto" && choice.is_none() {
+                app.bot.answer_callback(&cb.id, None, false).await;
+                return;
+            }
+            app.store.set_audio_lang(cb.from.id, choice);
+            let name = audio_lang_name(lang, choice);
+            app.bot.answer_callback(&cb.id, Some(name), false).await;
+            let text = match lang {
+                Lang::Ru => format!("🎧 Аудиодорожка по умолчанию: <b>{name}</b>"),
+                Lang::Uk => format!("🎧 Аудіодоріжка за замовчуванням: <b>{name}</b>"),
+                Lang::Es => format!("🎧 Pista de audio predeterminada: <b>{name}</b>"),
+                _ => format!("🎧 Default audio track: <b>{name}</b>"),
+            };
+            let back_btn = match lang {
+                Lang::Ru => "« Назад в настройки",
+                Lang::Uk => "« Назад до налаштувань",
+                Lang::Es => "« Volver a ajustes",
+                _ => "« Back to settings",
+            };
+            let kb = json!({
+                "inline_keyboard": [[{ "text": back_btn, "callback_data": "cfg:back" }]]
+            });
+            if let Err(e) = app.bot.edit_message(msg.chat.id, msg.message_id, &text, Some(kb)).await {
+                log::debug!("edit after audio lang change failed: {e}");
+            }
         }
         // /quality: remember a default.
         "d" => {
@@ -2893,6 +3024,39 @@ async fn handle_callback(app: &Arc<App>, cb: CallbackQuery) {
                     let kb = json!({ "inline_keyboard": rows });
                     let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &title, Some(kb)).await;
                 }
+                "alang" => {
+                    app.bot.answer_callback(&cb.id, None, false).await;
+                    let cur_al = audio_lang_name(lang, app.store.audio_lang(cb.from.id));
+                    let (title, auto_label) = match lang {
+                        Lang::Ru => (
+                            format!("🎧 <b>Выберите язык аудиодорожки</b>\nТекущий: <b>{cur_al}</b>"),
+                            "🌐 Авто (оригинал)",
+                        ),
+                        Lang::Uk => (
+                            format!("🎧 <b>Оберіть мову аудіодоріжки</b>\nПоточна: <b>{cur_al}</b>"),
+                            "🌐 Авто (оригінал)",
+                        ),
+                        Lang::Es => (
+                            format!("🎧 <b>Selecciona el idioma de audio</b>\nActual: <b>{cur_al}</b>"),
+                            "🌐 Auto (original)",
+                        ),
+                        _ => (
+                            format!("🎧 <b>Select audio track language</b>\nCurrent: <b>{cur_al}</b>"),
+                            "🌐 Auto (original)",
+                        ),
+                    };
+                    let kb = json!({
+                        "inline_keyboard": [
+                            [
+                                { "text": AudioLang::Ru.button(), "callback_data": "al:ru" },
+                                { "text": AudioLang::En.button(), "callback_data": "al:en" }
+                            ],
+                            [{ "text": auto_label, "callback_data": "al:auto" }],
+                            [{ "text": back_btn, "callback_data": "cfg:back" }]
+                        ]
+                    });
+                    let _ = app.bot.edit_message(msg.chat.id, msg.message_id, &title, Some(kb)).await;
+                }
                 "lang" => {
                     app.bot.answer_callback(&cb.id, None, false).await;
                     let title = match lang {
@@ -3341,7 +3505,7 @@ mod tests {
 
     #[test]
     fn keyboards_fit_callback_limits() {
-        let youtube_picker = picker_keyboard(Lang::Ru, "ffffffabc", 1080, None, u64::MAX, Some("dQw4w9WgXcQ"));
+        let youtube_picker = picker_keyboard(Lang::Ru, "ffffffabc", 1080, None, u64::MAX, Some("dQw4w9WgXcQ"), None);
         assert_eq!(
             youtube_picker["inline_keyboard"].as_array().unwrap().last().unwrap(),
             &json!([{ "text": "💬 Комментарии", "callback_data": "comm:dQw4w9WgXcQ:0" }])
@@ -3355,23 +3519,24 @@ mod tests {
                 }
             }
         }
-        let all = picker_keyboard(Lang::En, "t", 480, None, u64::MAX, None).to_string();
+        let all = picker_keyboard(Lang::En, "t", 480, None, u64::MAX, None, Some(AudioLang::Ru)).to_string();
         assert!(all.contains("q:t:480") && all.contains("q:t:360") && all.contains("q:t:audio"));
         assert!(all.contains("q:t:max") && !all.contains("q:t:720"));
+        assert!(all.contains("pa:t:ru") && all.contains("pa:t:en") && all.contains("pa:t:auto"));
         assert!(!all.contains("comm:"));
         assert!(default_keyboard(Lang::En.t(), 1080).to_string().contains("d:ask"));
 
         // Formula filtering for long videos (limit: 2000 MB)
         let limit_2gb = 2000 * 1024 * 1024;
-        let short_kb = picker_keyboard(Lang::En, "t", 1440, Some(600), limit_2gb, None).to_string();
+        let short_kb = picker_keyboard(Lang::En, "t", 1440, Some(600), limit_2gb, None, None).to_string();
         assert!(short_kb.contains("q:t:1440"));
         assert!(short_kb.contains("q:t:1080"));
 
-        let mid_kb = picker_keyboard(Lang::En, "t", 1440, Some(2100), limit_2gb, None).to_string();
+        let mid_kb = picker_keyboard(Lang::En, "t", 1440, Some(2100), limit_2gb, None, None).to_string();
         assert!(!mid_kb.contains("q:t:1440"));
         assert!(mid_kb.contains("q:t:1080"));
 
-        let long_kb = picker_keyboard(Lang::En, "t", 1440, Some(4500), limit_2gb, None).to_string();
+        let long_kb = picker_keyboard(Lang::En, "t", 1440, Some(4500), limit_2gb, None, None).to_string();
         assert!(!long_kb.contains("q:t:1440"));
         assert!(!long_kb.contains("q:t:1080"));
         assert!(long_kb.contains("q:t:720"));
@@ -3407,6 +3572,7 @@ mod tests {
             url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(),
             quality: Quality::Max,
             lang: Lang::Ru,
+            audio_lang: None,
             status_msg: None,
             user_msg_id: None,
         };

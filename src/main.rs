@@ -398,7 +398,7 @@ async fn fetch_cli(cfg: Config, args: &[String]) -> i32 {
     });
     let plugins = Plugins::load(cfg.plugin_dir.as_deref());
     let started = std::time::Instant::now();
-    let result = ytdlp::fetch(&cfg, &plugins, url, kind, cap, &dir, &stage, &|_| None, &|_| ()).await;
+    let result = ytdlp::fetch(&cfg, &plugins, url, kind, cap, None, &dir, &stage, &|_| None, &|_| ()).await;
     let code = match result {
         Err(e) => {
             eprintln!("failed: {e:?}");

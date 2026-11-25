@@ -21,7 +21,7 @@ use crate::config::{AudioFormat, Config};
 use crate::plugins::Plugins;
 use crate::proc::{self, RunError};
 use crate::state::CacheEntry;
-use crate::types::{Kind, Stage};
+use crate::types::{AudioLang, Kind, Stage};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 const PROGRESS_PREFIX: &str = "PROG|";
@@ -193,6 +193,8 @@ pub struct Format {
     #[serde(default, deserialize_with = "text")]
     pub acodec: Option<String>,
     #[serde(default, deserialize_with = "text")]
+    pub language: Option<String>,
+    #[serde(default, deserialize_with = "text")]
     pub resolution: Option<String>,
     #[serde(default, deserialize_with = "num")]
     pub height: Option<f64>,
@@ -233,6 +235,14 @@ impl Format {
 
     fn is_h264(&self) -> bool {
         self.vcodec.as_deref().is_some_and(|v| v.starts_with("avc") || v.starts_with("h264"))
+    }
+
+    fn matches_lang(&self, lang: AudioLang) -> bool {
+        let code = lang.code();
+        self.language.as_deref().is_some_and(|l| {
+            let l = l.trim().to_ascii_lowercase();
+            l == code || l.starts_with(&format!("{code}-")) || l.starts_with(&format!("{code}_"))
+        })
     }
 
     fn height(&self) -> Option<u32> {
@@ -285,23 +295,32 @@ impl Info {
     }
 
     /// Size of the best audio-only stream, used when it has to be merged in.
-    fn audio_est(&self) -> Option<u64> {
-        self.formats
-            .iter()
-            .filter(|f| f.is_audio_only())
-            .max_by(|a, b| a.tbr.unwrap_or(0.0).total_cmp(&b.tbr.unwrap_or(0.0)))
+    fn audio_est(&self, audio_lang: Option<AudioLang>) -> Option<u64> {
+        let matching = audio_lang.and_then(|lang| {
+            self.formats
+                .iter()
+                .filter(|f| f.is_audio_only() && f.matches_lang(lang))
+                .max_by(|a, b| a.tbr.unwrap_or(0.0).total_cmp(&b.tbr.unwrap_or(0.0)))
+        });
+        matching
+            .or_else(|| {
+                self.formats
+                    .iter()
+                    .filter(|f| f.is_audio_only())
+                    .max_by(|a, b| a.tbr.unwrap_or(0.0).total_cmp(&b.tbr.unwrap_or(0.0)))
+            })
             .and_then(|f| f.est_bytes(self.duration()))
     }
 
     /// Estimated download size at exactly `height`, preferring H.264.
-    fn est_for_height(&self, height: u32) -> Option<u64> {
+    fn est_for_height(&self, height: u32, audio_lang: Option<AudioLang>) -> Option<u64> {
         let at: Vec<&Format> = self.formats.iter().filter(|f| f.is_video() && f.height() == Some(height)).collect();
         let h264: Vec<&Format> = at.iter().copied().filter(|f| f.is_h264()).collect();
         let pool = if h264.is_empty() { at } else { h264 };
         let best = pool.into_iter().max_by(|a, b| a.tbr.unwrap_or(0.0).total_cmp(&b.tbr.unwrap_or(0.0)))?;
         let video = best.est_bytes(self.duration())?;
         if best.is_video_only() {
-            Some(video + self.audio_est().unwrap_or(0))
+            Some(video + self.audio_est(audio_lang).unwrap_or(0))
         } else {
             Some(video)
         }
@@ -343,15 +362,34 @@ pub struct Plan {
 
 /// Pick the best quality that is at most `cap` pixels high and fits `limit`
 /// bytes. `keep_codec` (audio): prefer AAC/MP3 sources that need no re-encode.
-pub fn plan(info: &Info, kind: Kind, cap: u32, limit: u64, keep_codec: bool) -> Result<Plan, Reject> {
+pub fn plan(
+    info: &Info,
+    kind: Kind,
+    cap: u32,
+    limit: u64,
+    keep_codec: bool,
+    audio_lang: Option<AudioLang>,
+) -> Result<Plan, Reject> {
     if kind == Kind::Audio {
-        let est = info.audio_est();
+        let est = info.audio_est(audio_lang);
         if let Some(bytes) = est.filter(|e| *e > limit) {
             return Err(Reject::TooLarge { bytes });
         }
-        let selector =
-            if keep_codec { "ba[acodec^=mp4a]/ba[acodec=mp3]/ba/b[height<=?480]/b" } else { "ba/b[height<=?480]/b" };
-        return Ok(Plan { selector: selector.to_string(), sort: None, audio: true, height: None, est });
+        let selector = match (audio_lang, keep_codec) {
+            (Some(lang), true) => {
+                let c = lang.code();
+                format!(
+                    "ba[language={c}][acodec^=mp4a]/ba[language^={c}-][acodec^=mp4a]/ba[language={c}]/ba[language^={c}-]/ba[acodec^=mp4a]/ba[acodec=mp3]/ba/b[height<=?480]/b"
+                )
+            }
+            (Some(lang), false) => {
+                let c = lang.code();
+                format!("ba[language={c}]/ba[language^={c}-]/ba/b[height<=?480]/b")
+            }
+            (None, true) => "ba[acodec^=mp4a]/ba[acodec=mp3]/ba/b[height<=?480]/b".to_string(),
+            (None, false) => "ba/b[height<=?480]/b".to_string(),
+        };
+        return Ok(Plan { selector, sort: None, audio: true, height: None, est });
     }
 
     let heights = info.heights();
@@ -366,7 +404,14 @@ pub fn plan(info: &Info, kind: Kind, cap: u32, limit: u64, keep_codec: bool) -> 
             return Err(Reject::TooLarge { bytes });
         }
         let est = if known.len() == 1 { smallest } else { None };
-        return Ok(Plan { selector: "bv*+ba/b".to_string(), sort: None, audio: false, height: None, est });
+        let selector = match audio_lang {
+            Some(lang) => {
+                let c = lang.code();
+                format!("bv*+ba[language={c}]/bv*+ba[language^={c}-]/bv*+ba/b")
+            }
+            None => "bv*+ba/b".to_string(),
+        };
+        return Ok(Plan { selector, sort: None, audio: false, height: None, est });
     }
 
     let mut candidates: Vec<u32> = heights.iter().copied().filter(|h| *h <= cap).collect();
@@ -376,7 +421,7 @@ pub fn plan(info: &Info, kind: Kind, cap: u32, limit: u64, keep_codec: bool) -> 
     }
     let mut too_big = 0;
     for height in candidates {
-        let est = info.est_for_height(height);
+        let est = info.est_for_height(height, audio_lang);
         if let Some(bytes) = est.filter(|e| *e > limit) {
             too_big = bytes;
             continue;
@@ -391,13 +436,16 @@ pub fn plan(info: &Info, kind: Kind, cap: u32, limit: u64, keep_codec: bool) -> 
                 .filter_map(Format::height)
                 .any(|h| h <= height && h >= height.min(720));
         let sort = if h264_ok { "vcodec:h264,res,fps,acodec:aac" } else { "res,fps,vcodec:h264,acodec:aac" };
-        return Ok(Plan {
-            selector: format!("bv*[height<=?{height}]+ba/b[height<=?{height}]/bv*+ba/b"),
-            sort: Some(sort),
-            audio: false,
-            height: Some(height),
-            est,
-        });
+        let selector = match audio_lang {
+            Some(lang) => {
+                let c = lang.code();
+                format!(
+                    "bv*[height<=?{height}]+ba[language={c}]/bv*[height<=?{height}]+ba[language^={c}-]/bv*[height<=?{height}]+ba/b[height<=?{height}]/bv*+ba/b"
+                )
+            }
+            None => format!("bv*[height<=?{height}]+ba/b[height<=?{height}]/bv*+ba/b"),
+        };
+        return Ok(Plan { selector, sort: Some(sort), audio: false, height: Some(height), est });
     }
     Err(Reject::TooLarge { bytes: too_big })
 }
@@ -712,6 +760,7 @@ async fn attempt(
     net: &NetOpts,
     kind: Kind,
     cap: u32,
+    audio_lang: Option<AudioLang>,
     dir: &Path,
     stage: &watch::Sender<Stage>,
     lookup: Lookup<'_>,
@@ -725,8 +774,8 @@ async fn attempt(
     }
     check(&info, cfg).map_err(DlError::Rejected)?;
     let kind = if info.audio_only() { Kind::Audio } else { kind };
-    let plan =
-        plan(&info, kind, cap, cfg.max_file_bytes, cfg.audio_format == AudioFormat::Auto).map_err(DlError::Rejected)?;
+    let plan = plan(&info, kind, cap, cfg.max_file_bytes, cfg.audio_format == AudioFormat::Auto, audio_lang)
+        .map_err(DlError::Rejected)?;
     log::debug!("plan: {plan:?}");
     let probed = Probed {
         video_key: cachekey::meta_video_key(info.extractor_key.as_deref(), info.id.as_deref()),
@@ -765,6 +814,7 @@ pub async fn fetch(
     url: &str,
     kind: Kind,
     cap: Option<u32>,
+    audio_lang: Option<AudioLang>,
     dir: &Path,
     stage: &watch::Sender<Stage>,
     lookup: Lookup<'_>,
@@ -784,7 +834,7 @@ pub async fn fetch(
 
     for _ in 0..MAX_ATTEMPTS {
         clear_dir(dir);
-        let raw = match attempt(cfg, &target, &net, kind, cap, dir, stage, lookup, on_title).await {
+        let raw = match attempt(cfg, &target, &net, kind, cap, audio_lang, dir, stage, lookup, on_title).await {
             Ok(outcome) => return Ok(outcome),
             Err(DlError::Failed(raw)) => raw,
             Err(DlError::ProbeTimeout) => {
@@ -912,21 +962,21 @@ mod tests {
     fn picks_best_quality_that_fits() {
         let i = youtube_like();
         // 1080p (60 MB + audio) does not fit 50 MB → 720p H.264.
-        let p = plan(&i, Kind::Video, 1080, 50 * MB, true).unwrap();
+        let p = plan(&i, Kind::Video, 1080, 50 * MB, true, None).unwrap();
         assert_eq!(p.height, Some(720));
         assert_eq!(p.selector, "bv*[height<=?720]+ba/b[height<=?720]/bv*+ba/b");
         assert_eq!(p.sort, Some("vcodec:h264,res,fps,acodec:aac"));
         assert_eq!(p.est, Some(20_000_000 + 1_700_000));
 
         // With a 2 GB limit the cap decides; 2160p is never chosen.
-        let p = plan(&i, Kind::Video, 1080, 2000 * MB, true).unwrap();
+        let p = plan(&i, Kind::Video, 1080, 2000 * MB, true, None).unwrap();
         assert_eq!(p.height, Some(1080));
 
         // A user-picked cap is honoured.
-        assert_eq!(plan(&i, Kind::Video, 480, 2000 * MB, true).unwrap().height, Some(360));
+        assert_eq!(plan(&i, Kind::Video, 480, 2000 * MB, true, None).unwrap().height, Some(360));
 
         // Nothing fits → refused with the smallest size seen.
-        assert_eq!(plan(&i, Kind::Video, 1080, 2 * MB, true), Err(Reject::TooLarge { bytes: 6_000_000 }));
+        assert_eq!(plan(&i, Kind::Video, 1080, 2 * MB, true, None), Err(Reject::TooLarge { bytes: 6_000_000 }));
     }
 
     #[test]
@@ -938,7 +988,7 @@ mod tests {
               {"vcodec": "none", "acodec": "opus", "tbr": 128}
             ]}"#,
         );
-        let p = plan(&i, Kind::Video, 1080, 2000 * MB, true).unwrap();
+        let p = plan(&i, Kind::Video, 1080, 2000 * MB, true, None).unwrap();
         assert_eq!(p.height, Some(1080));
         assert_eq!(p.sort, Some("res,fps,vcodec:h264,acodec:aac"));
         // tbr-based estimate: (2000 + 128) kbit/s * 60 s
@@ -948,20 +998,38 @@ mod tests {
     #[test]
     fn audio_and_unknown_heights() {
         let i = youtube_like();
-        let p = plan(&i, Kind::Audio, 1080, 50 * MB, true).unwrap();
+        let p = plan(&i, Kind::Audio, 1080, 50 * MB, true, None).unwrap();
         assert!(p.audio);
         assert!(p.selector.starts_with("ba[acodec^=mp4a]/"));
-        assert_eq!(plan(&i, Kind::Audio, 1080, 50 * MB, false).unwrap().selector, "ba/b[height<=?480]/b");
-        assert_eq!(plan(&i, Kind::Audio, 1080, MB, true), Err(Reject::TooLarge { bytes: 1_700_000 }));
+        assert_eq!(plan(&i, Kind::Audio, 1080, 50 * MB, false, None).unwrap().selector, "ba/b[height<=?480]/b");
+        assert_eq!(plan(&i, Kind::Audio, 1080, MB, true, None), Err(Reject::TooLarge { bytes: 1_700_000 }));
 
         let direct = info(r#"{"formats": [{"ext": "webm", "filesize": 3000000}]}"#);
-        let p = plan(&direct, Kind::Video, 1080, 50 * MB, true).unwrap();
+        let p = plan(&direct, Kind::Video, 1080, 50 * MB, true, None).unwrap();
         assert_eq!((p.selector.as_str(), p.height, p.est), ("bv*+ba/b", None, Some(3_000_000)));
-        assert_eq!(plan(&direct, Kind::Video, 1080, MB, true), Err(Reject::TooLarge { bytes: 3_000_000 }));
+        assert_eq!(plan(&direct, Kind::Video, 1080, MB, true, None), Err(Reject::TooLarge { bytes: 3_000_000 }));
 
         let sc = info(r#"{"formats": [{"ext": "mp3", "vcodec": "none", "acodec": "mp3", "tbr": 128}]}"#);
         assert!(sc.audio_only());
         assert!(!i.audio_only());
+    }
+
+    #[test]
+    fn audio_lang_filters_with_fallback() {
+        let i = info(
+            r#"{"formats": [
+              {"vcodec": "avc1", "acodec": "none", "height": 720, "filesize": 10000000},
+              {"vcodec": "none", "acodec": "mp4a", "language": "ru", "tbr": 128, "filesize": 1000000},
+              {"vcodec": "none", "acodec": "mp4a", "language": "en-US", "tbr": 128, "filesize": 2000000}
+            ]}"#,
+        );
+        let pv = plan(&i, Kind::Video, 1080, 50 * MB, true, Some(AudioLang::Ru)).unwrap();
+        assert!(pv.selector.starts_with("bv*[height<=?720]+ba[language=ru]/bv*[height<=?720]+ba[language^=ru-]/"));
+        assert_eq!(pv.est, Some(11_000_000));
+
+        let pa = plan(&i, Kind::Audio, 1080, 50 * MB, true, Some(AudioLang::En)).unwrap();
+        assert!(pa.selector.starts_with("ba[language=en][acodec^=mp4a]/ba[language^=en-][acodec^=mp4a]/"));
+        assert_eq!(pa.est, Some(2_000_000));
     }
 
     #[test]
