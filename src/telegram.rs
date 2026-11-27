@@ -253,7 +253,7 @@ pub struct Bot {
     http: reqwest::Client,
     base: String,
     file_base: String,
-    local_api_files: bool,
+    token: String,
     pub id: i64,
     pub username: String,
 }
@@ -273,7 +273,7 @@ impl Bot {
             http,
             base: format!("{}/bot{}", cfg.api_url, cfg.bot_token),
             file_base: format!("{}/file/bot{}", cfg.api_url, cfg.bot_token),
-            local_api_files: cfg.local_api_files,
+            token: cfg.bot_token.clone(),
             id: 0,
             username: String::new(),
         })
@@ -315,16 +315,23 @@ impl Bot {
         }
         let f: TgFile = self.call("getFile", &json!({"file_id": file_id}), SHORT_TIMEOUT).await?;
         let path = f.file_path.ok_or_else(|| TgError::Net("getFile returned no file_path".into()))?;
-        if self.local_api_files {
-            let p = Path::new(&path);
-            if p.is_file() {
-                return tokio::fs::read(p).await.map_err(|e| TgError::Net(format!("read local file: {e}")));
-            }
+        let p = Path::new(&path);
+        if p.is_file() {
+            return tokio::fs::read(p)
+                .await
+                .map_err(|e| TgError::Net(format!("read local file {path}: {e}")));
         }
-        let url = format!("{}/{}", self.file_base, path.trim_start_matches('/'));
+        // Local Bot API server returns an absolute path like
+        // `/var/lib/telegram-bot-api/<token>/voice/file_0.oga`, while its HTTP
+        // `/file/bot<token>/<rel>` endpoint expects the path after `<token>/`.
+        let rel = path
+            .split_once(&format!("/{}/", self.token))
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| path.trim_start_matches('/'));
+        let url = format!("{}/{}", self.file_base, rel.trim_start_matches('/'));
         let resp = self.http.get(&url).timeout(Duration::from_secs(120)).send().await.map_err(net)?;
         if !resp.status().is_success() {
-            return Err(TgError::Net(format!("file download HTTP {}", resp.status())));
+            return Err(TgError::Net(format!("file download HTTP {} (file_path={path})", resp.status())));
         }
         resp.bytes().await.map(|b| b.to_vec()).map_err(net)
     }
