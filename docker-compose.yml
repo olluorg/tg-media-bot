@@ -63,6 +63,9 @@ services:
       # yt-dlp writes refreshed cookies back, so this stays read-write.
       - ./cookies:/cookies
       - ./plugins:/plugins:ro
+    # Read access to telegram-bot-api's 0750 directory (owned by UID/GID 101).
+    group_add:
+      - "101"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "/usr/local/bin/tg-media-bot", "health"]
