@@ -294,6 +294,30 @@ docker compose run --rm bot fetch "https://youtu.be/..." 480      # ограни
 
 ---
 
+## Архитектура
+
+```mermaid
+flowchart LR
+    U["Пользователь (Telegram)"] <--> TG["Telegram Bot API / Local Bot API"]
+    TG <-->|"Long Polling + bot-api-data"| BOT["tg-media-bot (Rust / Tokio)"]
+
+    subgraph CORE["Внутри контейнера bot"]
+        BOT --> Q["Очередь и лимиты (Semaphore)"]
+        Q -->|"Ссылки"| YTDLP["yt-dlp + ffmpeg"]
+        YTDLP -->|"Медиа до 2 ГБ"| BOT
+
+        Q -->|"Голос / кружочек / аудио"| STT["voicy-core (GigaAM-v3 INT8 + Silero VAD)"]
+        STT -->|"MP4 fallback при необходимости"| FFMPEG["ffmpeg (16 kHz WAV)"]
+        FFMPEG --> STT
+        STT -->|"Текст"| BOT
+
+        BOT <--> DB["SQLite (кэш file_id, настройки, статистика)"]
+        SUBS["Подписки (RSS / WebSub)"] --> BOT
+    end
+```
+
+---
+
 ## Лицензия
 
 Проект распространяется под лицензией [MIT](LICENSE).
