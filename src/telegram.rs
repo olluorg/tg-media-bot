@@ -317,9 +317,7 @@ impl Bot {
         let path = f.file_path.ok_or_else(|| TgError::Net("getFile returned no file_path".into()))?;
         let p = Path::new(&path);
         if p.is_file() {
-            return tokio::fs::read(p)
-                .await
-                .map_err(|e| TgError::Net(format!("read local file {path}: {e}")));
+            return tokio::fs::read(p).await.map_err(|e| TgError::Net(format!("read local file {path}: {e}")));
         }
         // Local Bot API server returns an absolute path like
         // `/var/lib/telegram-bot-api/<token>/voice/file_0.oga`, while its HTTP
