@@ -63,7 +63,37 @@ impl SttService {
         let _permit = self.gate.acquire().await.map_err(|_| "stt gate closed".to_string())?;
         let stt = self.get().await?;
         let opts = TranscribeOptions { language: Some("ru".into()), ..Default::default() };
-        let tr = stt.transcribe_file_async(bytes, opts).await.map_err(|e| format!("{e:#}"))?;
+        let tr = match stt.clone().transcribe_file_async(bytes.clone(), opts.clone()).await {
+            Ok(tr) => tr,
+            Err(first_err) => {
+                // MP4/MOV (e.g. Telegram video_note) with moov atom at EOF cannot be demuxed from pipe:0;
+                // extract 16 kHz mono WAV from a seekable temp file via ffmpeg and retry.
+                let wav =
+                    extract_wav_via_ffmpeg(&bytes).await.map_err(|e| format!("{first_err:#}; ffmpeg fallback: {e}"))?;
+                stt.transcribe_file_async(wav, opts).await.map_err(|e| format!("{e:#}"))?
+            }
+        };
         Ok(tr.text.trim().to_string())
     }
+}
+
+async fn extract_wav_via_ffmpeg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let dir = std::env::temp_dir();
+    let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = dir.join(format!("tgmb-stt-{}-{unique}.bin", std::process::id()));
+    tokio::fs::write(&tmp, bytes).await.map_err(|e| format!("write temp: {e}"))?;
+    let ffmpeg = std::env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into());
+    let out = tokio::process::Command::new(&ffmpeg)
+        .args(["-v", "error", "-y", "-i"])
+        .arg(&tmp)
+        .args(["-vn", "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"])
+        .output()
+        .await;
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let out = out.map_err(|e| format!("spawn ffmpeg: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("ffmpeg exited {}: {}", out.status, err.trim()));
+    }
+    Ok(out.stdout)
 }
