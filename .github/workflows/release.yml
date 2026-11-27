@@ -4,7 +4,7 @@ name: Build & Release
 # - tag v*            -> Docker image (semver tags + latest) + GitHub Release with binaries
 on:
   push:
-    branches: [master, feat/voicy-stt]
+    branches: [master]
     tags: ["v*"]
   workflow_dispatch:
 
