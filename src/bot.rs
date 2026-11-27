@@ -1608,6 +1608,18 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
 
     let urls = urls_of(&msg, &text);
     if urls.is_empty() {
+        if app.cfg.stt_enabled {
+            if let Some(file_ref) = audio_file_of(&msg) {
+                if !msg.chat.is_group()
+                    || msg.reply_to_message.as_ref().and_then(|r| r.from.as_ref()).is_some_and(|f| f.id == app.bot.id)
+                {
+                    let file_id = file_ref.file_id.clone();
+                    let file_size = file_ref.file_size;
+                    handle_stt_message(app, &ctx, file_id, file_size).await;
+                    return;
+                }
+            }
+        }
         let addressed = !msg.chat.is_group()
             || msg.reply_to_message.as_ref().and_then(|r| r.from.as_ref()).is_some_and(|f| f.id == app.bot.id)
             || (!app.bot.username.is_empty()
@@ -1648,6 +1660,109 @@ async fn handle_message(app: &Arc<App>, msg: Message) {
         Some(q) => enqueue_all(app, &ctx, urls, q, None, Some(msg.message_id)).await,
         None => ask_quality(app, &ctx, urls, Some(msg.message_id)).await,
     }
+}
+
+async fn handle_stt_message(app: &Arc<App>, ctx: &Ctx, file_id: String, file_size: Option<u64>) {
+    let max_bytes = app.cfg.stt_max_mb * 1024 * 1024;
+    if let Some(sz) = file_size {
+        if sz > max_bytes {
+            let reply = match ctx.lang {
+                Lang::Ru => format!("⚠️ Файл слишком большой для распознавания (лимит {} МБ).", app.cfg.stt_max_mb),
+                Lang::Uk => format!("⚠️ Файл занадто великий для розпізнавання (ліміт {} МБ).", app.cfg.stt_max_mb),
+                Lang::Es => {
+                    format!("⚠️ El archivo es demasiado grande para transcribir (límite {} MB).", app.cfg.stt_max_mb)
+                }
+                _ => format!("⚠️ File is too large to transcribe (limit {} MB).", app.cfg.stt_max_mb),
+            };
+            app.say(ctx.chat, ctx.thread, &reply, None).await;
+            return;
+        }
+    }
+
+    let _ = app.bot.send_chat_action(ctx.chat, "typing", ctx.thread).await;
+    let bytes = match app.bot.download_file(&file_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("stt download failed: {e}");
+            let reply = match ctx.lang {
+                Lang::Ru => "❌ Не удалось скачать аудио из Telegram.",
+                Lang::Uk => "❌ Не вдалося завантажити аудіо з Telegram.",
+                Lang::Es => "❌ No se pudo descargar el audio de Telegram.",
+                _ => "❌ Failed to download audio from Telegram.",
+            };
+            app.say(ctx.chat, ctx.thread, reply, None).await;
+            return;
+        }
+    };
+
+    if bytes.len() as u64 > max_bytes {
+        let reply = match ctx.lang {
+            Lang::Ru => format!("⚠️ Файл слишком большой для распознавания (лимит {} МБ).", app.cfg.stt_max_mb),
+            _ => format!("⚠️ File is too large to transcribe (limit {} MB).", app.cfg.stt_max_mb),
+        };
+        app.say(ctx.chat, ctx.thread, &reply, None).await;
+        return;
+    }
+
+    let _ = app.bot.send_chat_action(ctx.chat, "typing", ctx.thread).await;
+    match app.stt.transcribe_bytes(bytes).await {
+        Ok(text) if text.is_empty() => {
+            let reply = match ctx.lang {
+                Lang::Ru => "🔇 Речь не обнаружена.",
+                Lang::Uk => "🔇 Мовлення не виявлено.",
+                Lang::Es => "🔇 No se detectó voz.",
+                _ => "🔇 No speech detected.",
+            };
+            app.say(ctx.chat, ctx.thread, reply, None).await;
+        }
+        Ok(text) => {
+            // Telegram limit is 4096 chars per message; chunk conservatively.
+            let mut rest = text.as_str();
+            while !rest.is_empty() {
+                let end = if rest.len() <= 3800 {
+                    rest.len()
+                } else {
+                    rest.char_indices().take_while(|(i, _)| *i <= 3800).last().map(|(i, _)| i).unwrap_or(3800)
+                };
+                let chunk = &rest[..end];
+                app.say(ctx.chat, ctx.thread, &crate::util::html_escape(chunk), None).await;
+                rest = rest[end..].trim_start();
+            }
+        }
+        Err(e) => {
+            log::error!("stt transcribe failed: {e}");
+            let reply = match ctx.lang {
+                Lang::Ru => "❌ Ошибка распознавания речи.",
+                Lang::Uk => "❌ Помилка розпізнавання мовлення.",
+                Lang::Es => "❌ Error al transcribir el audio.",
+                _ => "❌ Speech recognition failed.",
+            };
+            app.say(ctx.chat, ctx.thread, reply, None).await;
+        }
+    }
+}
+
+fn audio_file_of(msg: &Message) -> Option<&crate::telegram::FileRef> {
+    if let Some(v) = &msg.voice {
+        return Some(v);
+    }
+    if let Some(a) = &msg.audio {
+        return Some(a);
+    }
+    if let Some(vn) = &msg.video_note {
+        return Some(vn);
+    }
+    if let Some(doc) = &msg.document {
+        let is_audio_mime = doc.mime_type.as_deref().is_some_and(|m| m.starts_with("audio/"));
+        let is_audio_ext = doc.file_name.as_deref().is_some_and(|n| {
+            let low = n.to_ascii_lowercase();
+            [".ogg", ".opus", ".mp3", ".wav", ".flac", ".m4a", ".aac", ".weba"].iter().any(|ext| low.ends_with(ext))
+        });
+        if is_audio_mime || is_audio_ext {
+            return Some(doc);
+        }
+    }
+    None
 }
 
 async fn run_command(app: &Arc<App>, msg: &Message, ctx: &Ctx, cmd: &str, args: &str) {

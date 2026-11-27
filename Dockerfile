@@ -46,6 +46,10 @@ WORKDIR /src
 # Ride out flaky DNS/network in build sandboxes.
 ENV CARGO_NET_RETRY=10
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake pkg-config autoconf automake libtool g++ git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Compile for modern x86-64-v3 (AVX2, BMI2) on amd64; use default native on arm64.
 RUN if [ "$TARGETARCH" = "amd64" ] || [ -z "$TARGETARCH" ]; then \
         mkdir -p /root/.cargo && printf '[build]\nrustflags = ["-C", "target-cpu=x86-64-v3"]\n' > /root/.cargo/config.toml; \
@@ -78,6 +82,7 @@ ENV PATH=/opt/yt-dlp/bin:$PATH \
     TEMP_DIR=/data/tmp \
     YTDLP_UPDATE_CMD="/opt/yt-dlp/bin/pip install --no-cache-dir -q -U yt-dlp[default] && /opt/yt-dlp/bin/python -m compileall -q /opt/yt-dlp" \
     MALLOC_ARENA_MAX=2 \
+    OMP_NUM_THREADS=1 \
     DENO_NO_UPDATE_CHECK=1 \
     DENO_DIR=/data/tmp/deno_cache \
     DENO_V8_FLAGS="--max-old-space-size=256"

@@ -18,6 +18,7 @@ mod proc;
 mod search;
 mod state;
 mod stats;
+mod stt;
 mod subs;
 mod sys;
 mod telegram;
@@ -283,6 +284,12 @@ async fn run(cfg: Config) -> i32 {
     let store = Store::load(&cfg.data_dir);
     let plugins = Plugins::load(cfg.plugin_dir.as_deref());
     let app = Arc::new(App::new(cfg, bot, store, plugins));
+    if app.cfg.stt_enabled {
+        match app.stt.warmup().await {
+            Ok(()) => log::info!("stt: GigaAM-v3 INT8 ready"),
+            Err(e) => log::error!("stt: failed to preload GigaAM-v3 ({e}); will retry on demand"),
+        }
+    }
     tokio::spawn(register_commands(app.clone()));
     tokio::spawn(housekeeping(app.clone()));
     tokio::spawn(updater(app.clone()));

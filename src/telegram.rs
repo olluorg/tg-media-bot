@@ -110,6 +110,12 @@ pub struct Entity {
 #[derive(Deserialize, Debug)]
 pub struct FileRef {
     pub file_id: String,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -129,6 +135,8 @@ pub struct Message {
     pub reply_to_message: Option<Box<Message>>,
     pub video: Option<FileRef>,
     pub audio: Option<FileRef>,
+    pub voice: Option<FileRef>,
+    pub video_note: Option<FileRef>,
     pub document: Option<FileRef>,
     pub successful_payment: Option<SuccessfulPayment>,
 }
@@ -244,6 +252,8 @@ pub struct Media<'a> {
 pub struct Bot {
     http: reqwest::Client,
     base: String,
+    file_base: String,
+    local_api_files: bool,
     pub id: i64,
     pub username: String,
 }
@@ -259,7 +269,14 @@ impl Bot {
             .user_agent(concat!("tg-media-bot/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| format!("http client: {e}"))?;
-        Ok(Bot { http, base: format!("{}/bot{}", cfg.api_url, cfg.bot_token), id: 0, username: String::new() })
+        Ok(Bot {
+            http,
+            base: format!("{}/bot{}", cfg.api_url, cfg.bot_token),
+            file_base: format!("{}/file/bot{}", cfg.api_url, cfg.bot_token),
+            local_api_files: cfg.local_api_files,
+            id: 0,
+            username: String::new(),
+        })
     }
 
     async fn finish<T: DeserializeOwned>(resp: Result<reqwest::Response, reqwest::Error>) -> Result<T, TgError> {
@@ -288,6 +305,28 @@ impl Bot {
         self.id = me.id;
         self.username = me.username.unwrap_or_default();
         Ok(())
+    }
+
+    /// Download a Telegram file (`voice`, `audio`, `document`, etc.) into memory.
+    pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, TgError> {
+        #[derive(Deserialize)]
+        struct TgFile {
+            file_path: Option<String>,
+        }
+        let f: TgFile = self.call("getFile", &json!({"file_id": file_id}), SHORT_TIMEOUT).await?;
+        let path = f.file_path.ok_or_else(|| TgError::Net("getFile returned no file_path".into()))?;
+        if self.local_api_files {
+            let p = Path::new(&path);
+            if p.is_file() {
+                return tokio::fs::read(p).await.map_err(|e| TgError::Net(format!("read local file: {e}")));
+            }
+        }
+        let url = format!("{}/{}", self.file_base, path.trim_start_matches('/'));
+        let resp = self.http.get(&url).timeout(Duration::from_secs(120)).send().await.map_err(net)?;
+        if !resp.status().is_success() {
+            return Err(TgError::Net(format!("file download HTTP {}", resp.status())));
+        }
+        resp.bytes().await.map(|b| b.to_vec()).map_err(net)
     }
 
     /// Long-poll for updates. Returns `(next_offset, updates)`; updates that

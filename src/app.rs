@@ -168,6 +168,8 @@ pub struct App {
     pub search_slots: Semaphore,
     /// Video comments extraction concurrency limit.
     pub comment_slots: Semaphore,
+    /// Speech-to-text engine (voicy-core GigaAM-v3 INT8).
+    pub stt: crate::stt::SttService,
     /// Per-user turn (RATE_LIMIT_PER_USER), created on demand.
     user_slots: Mutex<HashMap<i64, Arc<Semaphore>>>,
     jobs: Mutex<HashMap<String, Entry>>,
@@ -482,6 +484,7 @@ impl App {
                 Arc::new(crate::stats::StatsDb::in_memory().expect("in-memory stats db"))
             }
         };
+        let stt = crate::stt::SttService::new(cfg.data_dir.join("voicy"));
         App {
             cfg,
             bot,
@@ -493,6 +496,7 @@ impl App {
             upload_slots,
             search_slots: Semaphore::new(2),
             comment_slots: Semaphore::new(2),
+            stt,
             user_slots: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),

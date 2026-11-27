@@ -88,6 +88,9 @@ pub struct Config {
     pub rss_min_delay_secs: u64,
     pub rss_max_delay_secs: u64,
     pub rss_channel_cooldown_secs: u64,
+
+    pub stt_enabled: bool,
+    pub stt_max_mb: u64,
 }
 
 /// Process environment layered over a `.env` file (real env wins).
@@ -277,6 +280,9 @@ impl Config {
             rss_min_delay_secs: env.num("RSS_MIN_DELAY_SECS", 3u64)?.clamp(1, 3600),
             rss_max_delay_secs: env.num("RSS_MAX_DELAY_SECS", 8u64)?.clamp(1, 3600),
             rss_channel_cooldown_secs: env.num("RSS_CHANNEL_COOLDOWN_SECS", 600u64)?.clamp(60, 86400),
+
+            stt_enabled: env.flag("STT_ENABLED", true),
+            stt_max_mb: env.num("STT_MAX_MB", 20u64)?.clamp(1, 2000),
         })
     }
 
