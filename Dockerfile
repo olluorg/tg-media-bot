@@ -47,7 +47,7 @@ WORKDIR /src
 ENV CARGO_NET_RETRY=10
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake pkg-config autoconf automake libtool g++ git \
+        build-essential cmake pkg-config autoconf automake libtool git \
     && rm -rf /var/lib/apt/lists/*
 
 # Compile for modern x86-64-v3 (AVX2, BMI2) on amd64; use default native on arm64.
