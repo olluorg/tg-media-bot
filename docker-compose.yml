@@ -59,6 +59,7 @@ services:
     volumes:
       - bot-data:/data
       - bot-tmp:/data/tmp
+      - bot-api-data:/var/lib/telegram-bot-api:ro
       # yt-dlp writes refreshed cookies back, so this stays read-write.
       - ./cookies:/cookies
       - ./plugins:/plugins:ro
